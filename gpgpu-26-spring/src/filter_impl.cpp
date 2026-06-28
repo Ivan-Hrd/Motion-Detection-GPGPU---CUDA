@@ -214,101 +214,122 @@ void hysteresis(uint8_t* buffer, int width, int height, int stride, int pixel_st
     }
 }
 
+void difference(uint8_t* buffer, int width, int height, int stride, int pixel_stride)
+{
+    // Initialisation si les dimensions changent
+    if (res_height != height || res_width != width) {
+        res_height = height;
+        res_width = width;
+        rs.clear();
+        rs.resize(width * height);
+        rngs.clear();
+        rngs.resize(width * height);
+        for (int i = 0; i < width * height; ++i) {
+            for (int j = 0; j < K; ++j) {
+                rs[i][j] = {0};
+            }
+            rngs[i] = std::mt19937(i);
+        }
+    }
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            uint8_t* lineptr = buffer + y * stride + x * pixel_stride;
+            rgb p = rgb{
+                lineptr[0],
+                lineptr[1],
+                lineptr[2]
+            };
+
+            int idx = y * width + x;
+            int m_idx = find_matching_reservoir(p, rs, idx);
+
+            // random init
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            float rand_val = dist(rngs[idx]);
+
+            // update w and samples
+            if (m_idx != -1 && rs[idx][m_idx].w > 0) { // match !
+                if (rs[idx][m_idx].w < MAX_WEIGHTS) {
+                    rs[idx][m_idx].w++;
+                    unsigned int tmpR1 = (unsigned int)rs[idx][m_idx].rgbV.r * (rs[idx][m_idx].w - 1) + (unsigned int)p.r;
+                    unsigned int tmpG1 = (unsigned int)rs[idx][m_idx].rgbV.g * (rs[idx][m_idx].w - 1) + (unsigned int)p.g;
+                    unsigned int tmpB1 = (unsigned int)rs[idx][m_idx].rgbV.b * (rs[idx][m_idx].w - 1) + (unsigned int)p.b;
+                    rs[idx][m_idx].rgbV.r = (uint8_t)(tmpR1 / rs[idx][m_idx].w);
+                    rs[idx][m_idx].rgbV.g = (uint8_t)(tmpG1 / rs[idx][m_idx].w);
+                    rs[idx][m_idx].rgbV.b = (uint8_t)(tmpB1 / rs[idx][m_idx].w);
+                } else {
+                    // Keep updating with moving average even when max weight reached
+                    unsigned int tmpR1 = (unsigned int)rs[idx][m_idx].rgbV.r * (MAX_WEIGHTS - 1) + (unsigned int)p.r;
+                    unsigned int tmpG1 = (unsigned int)rs[idx][m_idx].rgbV.g * (MAX_WEIGHTS - 1) + (unsigned int)p.g;
+                    unsigned int tmpB1 = (unsigned int)rs[idx][m_idx].rgbV.b * (MAX_WEIGHTS - 1) + (unsigned int)p.b;
+                    rs[idx][m_idx].rgbV.r = (uint8_t)(tmpR1 / MAX_WEIGHTS);
+                    rs[idx][m_idx].rgbV.g = (uint8_t)(tmpG1 / MAX_WEIGHTS);
+                    rs[idx][m_idx].rgbV.b = (uint8_t)(tmpB1 / MAX_WEIGHTS);
+                }
+            } else if (m_idx != -1 && rs[idx][m_idx].w == 0) { // empty
+                rs[idx][m_idx].rgbV = p;
+                rs[idx][m_idx].w = 1;
+            } else { // no match & no empty slot
+                int min_idx = min_res(rs, idx);
+                int total_weights = 0;
+                for (int i = 0; i < K; ++i) {
+                    total_weights += rs[idx][i].w;
+                }
+                if (rand_val * total_weights >= rs[idx][min_idx].w) {
+                    rs[idx][min_idx].rgbV = p;
+                    rs[idx][min_idx].w = 1;
+                }
+            }
+
+
+#define BG_MIN_WEIGHT 30
+            int score = 255;
+            bool found_established = false;
+
+            for (int i = 0; i < K; ++i) {
+                if (rs[idx][i].w >= BG_MIN_WEIGHT) {
+                    found_established = true;
+                    int d = std::max(
+                        abs((int)p.r - (int)rs[idx][i].rgbV.r),
+                        std::max(abs((int)p.g - (int)rs[idx][i].rgbV.g),
+                        abs((int)p.b - (int)rs[idx][i].rgbV.b))
+                    );
+                    score = std::min(score, d);
+                }
+            }
+
+            // Si aucun n'est assez lourd (poids < 30),
+            // on utilise le plus lourd par défaut pour ne pas rester bloqué
+            if (!found_established) {
+                rgb background = rs[idx][max_res(rs, idx)].rgbV;
+                score = std::max(std::max(abs((int)p.r - (int)background.r),
+                                      abs((int)p.g - (int)background.g)),
+                                      abs((int)p.b - (int)background.b));
+            }
+            uint8_t value = 0;
+            value = static_cast<uint8_t>(std::min(score, 255));
+            
+
+            lineptr[0] = value;
+            lineptr[1] = value;
+            lineptr[2] = value;
+        }
+    }
+}
+
 extern "C" {
 
     void filter_impl(uint8_t* buffer, int width, int height, int stride, int pixel_stride)
     {
-
-
         // STEP 1 : difference
-        if (res_height != height || res_width != width) {
-            res_height = height;
-            res_width = width;
-            rs.clear();
-            rs.resize(width*height);
-            rngs.clear();
-            rngs.resize(width*height);
-            for (int i = 0; i < width*height; ++i) {
-                for (int j = 0; j < K; ++j) {
-                    rs[i][j] = {0};
-                }
-                rngs[i] = std::mt19937(i);
-            }
-
-        }
-        for (int y = 0; y < height; ++y)
-        {
-            for (int x = 0; x < width; ++x)
-            {
-                uint8_t* lineptr = buffer + y * stride + x * pixel_stride;
-                rgb p = rgb{
-                    lineptr[0],
-                    lineptr[1],
-                    lineptr[2]
-                };
-
-                int idx = y * width + x;
-                int m_idx = find_matching_reservoir(p, rs, idx);
-
-                // random init
-                std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-                float rand_val = dist(rngs[idx]);
-
-                // update w and samples
-                if (m_idx != -1 && rs[idx][m_idx].w > 0) { // match !
-                    if (rs[idx][m_idx].w < MAX_WEIGHTS) {
-                        rs[idx][m_idx].w++;
-                        unsigned int tmpR1 = (unsigned int)rs[idx][m_idx].rgbV.r * (rs[idx][m_idx].w - 1) + (unsigned int)p.r;
-                        unsigned int tmpG1 = (unsigned int)rs[idx][m_idx].rgbV.g * (rs[idx][m_idx].w - 1) + (unsigned int)p.g;
-                        unsigned int tmpB1 = (unsigned int)rs[idx][m_idx].rgbV.b * (rs[idx][m_idx].w - 1) + (unsigned int)p.b;
-                        rs[idx][m_idx].rgbV.r = (uint8_t)(tmpR1 / rs[idx][m_idx].w);
-                        rs[idx][m_idx].rgbV.g = (uint8_t)(tmpG1 / rs[idx][m_idx].w);
-                        rs[idx][m_idx].rgbV.b = (uint8_t)(tmpB1 / rs[idx][m_idx].w);
-                    }
-                    else {
-                        // Keep updating with moving average even when max weight reached
-                        unsigned int tmpR1 = (unsigned int)rs[idx][m_idx].rgbV.r * (MAX_WEIGHTS - 1) + (unsigned int)p.r;
-                        unsigned int tmpG1 = (unsigned int)rs[idx][m_idx].rgbV.g * (MAX_WEIGHTS - 1) + (unsigned int)p.g;
-                        unsigned int tmpB1 = (unsigned int)rs[idx][m_idx].rgbV.b * (MAX_WEIGHTS - 1) + (unsigned int)p.b;
-                        rs[idx][m_idx].rgbV.r = (uint8_t)(tmpR1 / MAX_WEIGHTS);
-                        rs[idx][m_idx].rgbV.g = (uint8_t)(tmpG1 / MAX_WEIGHTS);
-                        rs[idx][m_idx].rgbV.b = (uint8_t)(tmpB1 / MAX_WEIGHTS);
-                    }
-                }
-                else if (m_idx != -1 && rs[idx][m_idx].w == 0) { // empty
-                    rs[idx][m_idx].rgbV = p;
-                    rs[idx][m_idx].w = 1;
-                }
-                else { // no match & no empty slot
-                    int min_idx = min_res(rs, idx);
-                    int total_weights = 0;
-                    for (int i = 0; i < K; ++i) {
-                        total_weights += rs[idx][i].w;
-                    }
-                    if (rand_val * total_weights >= rs[idx][min_idx].w) {
-                        rs[idx][min_idx].rgbV = p;
-                        rs[idx][min_idx].w = 1;
-                    }
-                }
-                rgb background = rs[idx][max_res(rs, idx)].rgbV;
-                int score = std::max(std::max(abs((int)p.r - (int)background.r),
-                                      abs((int)p.g - (int)background.g)),
-                                      abs((int)p.b - (int)background.b));
-
-                uint8_t value = static_cast<uint8_t>(std::min(score, 255));
-
-                lineptr[0] = value;
-                lineptr[1] = value;
-                lineptr[2] = value;
-            }
-        }
+        difference(buffer, width, height, stride, pixel_stride);
 
         // STEP 2 : Ouverture
         static std::vector<uint8_t> eroded;
 
         erosion(buffer, eroded, width, height, stride, pixel_stride, RADIUS);
         dilatation(eroded, buffer, width, height, stride, pixel_stride, RADIUS);
-
 
         // STEP 3: Seuillage d’hystérésis
         hysteresis(buffer, width, height, stride, pixel_stride, LOW, HIGH);
