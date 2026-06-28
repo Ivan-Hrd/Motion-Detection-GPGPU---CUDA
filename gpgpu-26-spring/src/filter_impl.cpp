@@ -11,8 +11,8 @@
 struct rgb {
     uint8_t r, g, b;
 };
-#define K 7
-#define RGB_DIFF_THRESHOLD 20
+#define K 10
+#define RGB_DIFF_THRESHOLD 15
 #define MAX_WEIGHTS 100
 #define RADIUS 1
 #define LOW 30
