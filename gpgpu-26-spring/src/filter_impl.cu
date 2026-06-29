@@ -8,6 +8,13 @@
 
 #define LOW 30
 #define HIGH 40
+#define cudaCheckError() {                                                                       \
+    cudaError_t e=cudaGetLastError();                                                        \
+    if(e!=cudaSuccess) {                                                                     \
+        printf("Cuda failure %s:%d: '%s'\n",__FILE__,__LINE__,cudaGetErrorString(e));        \
+        exit(EXIT_FAILURE);                                                                  \
+    }                                                                                        \
+}
 
 #define CHECK_CUDA_ERROR(val) check((val), #val, __FILE__, __LINE__)
 template <typename T>
@@ -192,6 +199,9 @@ extern "C" {
         CHECK_CUDA_ERROR(err);
 
         hysteresis_init<<<gridSize, blockSize>>>(dBuffer, marker, candidate, width, height, pitch, pixel_stride);
+        cudaDeviceSynchronize();
+        cudaCheckError();
+
         bool changed_host = true;
         while (changed_host) {
             changed_host = false;
@@ -199,6 +209,7 @@ extern "C" {
             CHECK_CUDA_ERROR(err);
 
             hysteresis_propagation<<<gridSize, blockSize>>>(dBuffer, marker, candidate, width, height, pitch, pixel_stride);
+            cudaCheckError();
 
             err = cudaMemcpy(&changed_host, &changed, sizeof(bool), cudaMemcpyDeviceToHost);
             CHECK_CUDA_ERROR(err);
