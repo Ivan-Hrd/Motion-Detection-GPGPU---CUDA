@@ -6,6 +6,9 @@
 #include <cstdio>
 #include "logo.h"
 
+#define LOW 30
+#define HIGH 40
+
 #define CHECK_CUDA_ERROR(val) check((val), #val, __FILE__, __LINE__)
 template <typename T>
 void check(T err, const char* const func, const char* const file,
@@ -60,10 +63,8 @@ __global__ void remove_red_channel_inp(std::byte* buffer, int width, int height,
 /// @param height
 /// @param stride
 /// @param pixel_stride
-/// @param low
-/// @param high
 /// @return
-__global__ void hysteresis_init(uint8_t* buffer, bool* marker, bool* candidate, int width, int height, int stride, int pixel_stride, int low, int high) {
+__global__ void hysteresis_init(uint8_t* buffer, bool* marker, bool* candidate, int width, int height, size_t stride, int pixel_stride) {
     unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height)
@@ -71,8 +72,8 @@ __global__ void hysteresis_init(uint8_t* buffer, bool* marker, bool* candidate, 
 
     uint8_t value = buffer[y * stride + x * pixel_stride];
     int i = y * width + x;
-    candidate[i] = value >= low;
-    marker[i] = value >= high;
+    candidate[i] = value >= LOW;
+    marker[i] = value >= HIGH;
 
     buffer[y * stride + x * pixel_stride] = 0;
     buffer[y * stride + x * pixel_stride + 1] = 0;
@@ -87,10 +88,8 @@ __global__ void hysteresis_init(uint8_t* buffer, bool* marker, bool* candidate, 
 /// @param height
 /// @param stride
 /// @param pixel_stride
-/// @param low
-/// @param high
 /// @return
-__global__ void hysteresis_propagation(uint8_t* buffer, bool* marker, bool* candidate, int width, int height, int stride, int pixel_stride, int low, int high) {
+__global__ void hysteresis_propagation(uint8_t* buffer, const bool* marker, const bool* candidate, int width, int height, size_t stride, int pixel_stride) {
     unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height)
@@ -98,7 +97,7 @@ __global__ void hysteresis_propagation(uint8_t* buffer, bool* marker, bool* cand
 
     uint8_t value = buffer[y * stride + x * pixel_stride];
     int i = y * width + x;
-    if (buffer[y * stride + x * pixel_stride]) return;
+    if (value) return;
 
     if (!candidate[i]) return;
 
@@ -167,7 +166,7 @@ extern "C" {
         load_logo();
 
         assert(sizeof(rgb) == pixel_stride);
-        std::byte* dBuffer;
+        uint8_t* dBuffer;
         size_t pitch;
 
         cudaError_t err;
@@ -181,12 +180,37 @@ extern "C" {
         dim3 blockSize(16,16);
         dim3 gridSize((width + (blockSize.x - 1)) / blockSize.x, (height + (blockSize.y - 1)) / blockSize.y);
 
-        remove_red_channel_inp<<<gridSize, blockSize>>>(dBuffer, width, height, pitch);
+
+
+        // STEP 3 : Hysteresis
+        bool* marker;
+        err = cudaMalloc(&marker, width * sizeof(bool) * height);
+        CHECK_CUDA_ERROR(err);
+
+        bool* candidate;
+        err = cudaMalloc(&candidate, width * sizeof(bool) * height);
+        CHECK_CUDA_ERROR(err);
+
+        hysteresis_init<<<gridSize, blockSize>>>(dBuffer, marker, candidate, width, height, pitch, pixel_stride);
+        bool changed_host = true;
+        while (changed_host) {
+            changed_host = false;
+            err = cudaMemset(&changed, changed_host, sizeof(changed));
+            CHECK_CUDA_ERROR(err);
+
+            hysteresis_propagation<<<gridSize, blockSize>>>(dBuffer, marker, candidate, width, height, pitch, pixel_stride);
+
+            err = cudaMemcpy(&changed_host, &changed, sizeof(bool), cudaMemcpyDeviceToHost);
+            CHECK_CUDA_ERROR(err);
+        }
+        //remove_red_channel_inp<<<gridSize, blockSize>>>(dBuffer, width, height, pitch);
 
         err = cudaMemcpy2D(src_buffer, src_stride, dBuffer, pitch, width * sizeof(rgb), height, cudaMemcpyDefault);
         CHECK_CUDA_ERROR(err);
 
         cudaFree(dBuffer);
+        cudaFree(marker);
+        cudaFree(candidate);
 
         err = cudaDeviceSynchronize();
         CHECK_CUDA_ERROR(err);
