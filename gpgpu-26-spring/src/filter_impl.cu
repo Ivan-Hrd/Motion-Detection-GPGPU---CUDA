@@ -25,7 +25,7 @@ struct rgb {
 };
 
 __constant__ uint8_t* logo;
-
+__device__ bool changed;
 /// @brief Black out the red channel from the video and add EPITA's logo
 /// @param buffer 
 /// @param width 
@@ -52,10 +52,91 @@ __global__ void remove_red_channel_inp(std::byte* buffer, int width, int height,
     }
 }
 
+/// @brief Initialization for hysteresis filter on the image contained in "buffer"
+/// @param buffer
+/// @param marker should be of size width * height
+/// @param candidate should be of size width * height
+/// @param width
+/// @param height
+/// @param stride
+/// @param pixel_stride
+/// @param low
+/// @param high
+/// @return
+__global__ void hysteresis_init(uint8_t* buffer, bool* marker, bool* candidate, int width, int height, int stride, int pixel_stride, int low, int high) {
+    unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height)
+        return;
+
+    uint8_t value = buffer[y * stride + x * pixel_stride];
+    int i = y * width + x;
+    candidate[i] = value >= low;
+    marker[i] = value >= high;
+
+    buffer[y * stride + x * pixel_stride] = 0;
+    buffer[y * stride + x * pixel_stride + 1] = 0;
+    buffer[y * stride + x * pixel_stride + 2] = 0;
+}
+
+/// @brief Propagation for hysteresis filter on the image contained in "buffer"
+/// @param buffer
+/// @param marker should be of size width * height
+/// @param candidate should be of size width * height
+/// @param width
+/// @param height
+/// @param stride
+/// @param pixel_stride
+/// @param low
+/// @param high
+/// @return
+__global__ void hysteresis_propagation(uint8_t* buffer, bool* marker, bool* candidate, int width, int height, int stride, int pixel_stride, int low, int high) {
+    unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height)
+        return;
+
+    uint8_t value = buffer[y * stride + x * pixel_stride];
+    int i = y * width + x;
+    if (buffer[y * stride + x * pixel_stride]) return;
+
+    if (!candidate[i]) return;
+
+    if (marker[i])
+    {
+        buffer[y * stride + x * pixel_stride] = 255;
+        buffer[y * stride + x * pixel_stride + 1] = 255;
+        buffer[y * stride + x * pixel_stride + 2] = 255;
+
+        changed = true;
+        return;
+    }
+
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx)
+        {
+            if (dx == 0 && dy == 0) continue;
+
+            int yy = y + dy;
+            int xx = x + dx;
+
+            if (yy < 0 || yy >= height || xx < 0 || xx >= width) continue;
+
+            if (buffer[yy * stride + xx * pixel_stride])
+            {
+                buffer[y * stride + x * pixel_stride] = 255;
+                buffer[y * stride + x * pixel_stride + 1] = 255;
+                buffer[y * stride + x * pixel_stride + 2] = 255;
+
+                changed = true;
+                break;
+            }
+        }
+    }
+}
 
 
-
-namespace 
+namespace
 {
     void load_logo()
     {
