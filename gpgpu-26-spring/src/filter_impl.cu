@@ -35,7 +35,6 @@ struct rgb {
 };
 
 __constant__ uint8_t* logo;
-__device__ bool changed;
 /// @brief Black out the red channel from the video and add EPITA's logo
 /// @param buffer 
 /// @param width 
@@ -95,8 +94,9 @@ __global__ void hysteresis_init(uint8_t* buffer, bool* marker, bool* candidate, 
 /// @param height
 /// @param stride
 /// @param pixel_stride
+/// @param changed
 /// @return
-__global__ void hysteresis_propagation(uint8_t* buffer, const bool* marker, const bool* candidate, int width, int height, size_t stride, int pixel_stride) {
+__global__ void hysteresis_propagation(uint8_t* buffer, const bool* marker, const bool* candidate, int width, int height, size_t stride, int pixel_stride, bool* changed) {
     unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height)
@@ -114,7 +114,7 @@ __global__ void hysteresis_propagation(uint8_t* buffer, const bool* marker, cons
         buffer[y * stride + x * pixel_stride + 1] = 255;
         buffer[y * stride + x * pixel_stride + 2] = 255;
 
-        changed = true;
+        *changed = true;
         return;
     }
 
@@ -134,7 +134,7 @@ __global__ void hysteresis_propagation(uint8_t* buffer, const bool* marker, cons
                 buffer[y * stride + x * pixel_stride + 1] = 255;
                 buffer[y * stride + x * pixel_stride + 2] = 255;
 
-                changed = true;
+                *changed = true;
                 break;
             }
         }
@@ -202,16 +202,20 @@ extern "C" {
         cudaDeviceSynchronize();
         cudaCheckError();
 
+        bool* d_changed;
+        err = cudaMalloc(&d_changed, sizeof(bool));
+        CHECK_CUDA_ERROR(err);
+
         bool changed_host = true;
         while (changed_host) {
             changed_host = false;
-            err = cudaMemset(&changed, changed_host, sizeof(changed));
+            err = cudaMemset(&d_changed, changed_host, sizeof(bool));
             CHECK_CUDA_ERROR(err);
 
-            hysteresis_propagation<<<gridSize, blockSize>>>(dBuffer, marker, candidate, width, height, pitch, pixel_stride);
+            hysteresis_propagation<<<gridSize, blockSize>>>(dBuffer, marker, candidate, width, height, pitch, pixel_stride, d_changed);
             cudaCheckError();
 
-            err = cudaMemcpy(&changed_host, &changed, sizeof(bool), cudaMemcpyDeviceToHost);
+            err = cudaMemcpy(&changed_host, &d_changed, sizeof(bool), cudaMemcpyDeviceToHost);
             CHECK_CUDA_ERROR(err);
         }
         //remove_red_channel_inp<<<gridSize, blockSize>>>(dBuffer, width, height, pitch);
