@@ -78,13 +78,13 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (x >= width || x >= height)
-        return
+    if (x >= width || y >= height)
+        return;
 
-            int idx = y * width + x;
+    int idx = y * width + x;
 
     uint8_t* line_ptr = buffer + y * stride + x * pixel_stride;
-    rgb p = { lineptr[0], lineptr[1], lineptr[2] };
+    rgb p = { line_ptr[0], line_ptr[1], line_ptr[2] };
 
     reservoir* res = reservoirs + idx * K;
 
@@ -97,11 +97,11 @@ __device__ int matching_reservoir(rgb p, reservoir* res)
     {
         if (res[j].w == 0)
         {
-            continue
+            continue;
         }
-        int dr = abs((int)p.r - (int)rs[idx][j].rgbV.r);
-        int dg = abs((int)p.g - (int)rs[idx][j].rgbV.g);
-        int db = abs((int)p.b - (int)rs[idx][j].rgbV.b);
+        int dr = abs((int)p.r - (int)res[idx][j].rgbV.r);
+        int dg = abs((int)p.g - (int)res[idx][j].rgbV.g);
+        int db = abs((int)p.b - (int)res[idx][j].rgbV.b);
         if (dr + dg + db < THRESHOLD)
         {
             return j;
@@ -174,7 +174,7 @@ void difference(uint8_t* buffer, int width, int height, int stride,
             CHECK_CUDA_ERROR(
                 cudaMalloc(&rs, width * height * K * sizeof(reservoir)));
             CHECK_CUDA_ERROR(
-                cudaMemset(&rs, 0, width * height * K * sizeof(reservoir)));
+                cudaMemset(rs, 0, width * height * K * sizeof(reservoir)));
         }
 
         assert(sizeof(rgb) == pixel_stride);
