@@ -71,6 +71,29 @@ __global__ void remove_red_channel_inp(std::byte* buffer, int width, int height,
     }
 }
 
+__device__ int matching_reservoir(rgb p, reservoir* res)
+{
+    int empty = -1;
+    for (int j = 0; j < K; j++)
+    {
+        if (res[j].w == 0)
+        {
+            if (empty == -1) {
+                empty = j;
+            }
+            continue;
+        }
+        int dr = abs((int)p.r - (int)res[j].rgbV.r);
+        int dg = abs((int)p.g - (int)res[j].rgbV.g);
+        int db = abs((int)p.b - (int)res[j].rgbV.b);
+        if (dr + dg + db < THRESHOLD)
+        {
+            return j;
+        }
+    }
+    return empty;
+}
+
 __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
                                   int width, int height, int stride,
                                   int pixel_stride)
@@ -88,26 +111,94 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
 
     reservoir* res = reservoirs + idx * K;
 
-    /// completer ici...
-}
+    int m_idx = matching_reservoir(p, res);
 
-__device__ int matching_reservoir(rgb p, reservoir* res)
-{
-    for (int j = 0; j < K; j++)
+    unsigned int seed = idx * 1234567 + threadIdx.x; // pour le rapport parler de ça ptetre
+    float rand_val = (seed % 1000) / 1000.0f;
+
+    if (m_idx != -1 && res[m_idx].w > 0)
     {
-        if (res[j].w == 0)
+        unsigned int w = res[m_idx].w;
+        if (w < MAX_WEIGHTS)
         {
-            continue;
+            res[m_idx].w++;
+            w = res[m_idx].w;
+            res[m_idx].rgbV.r = (uint8_t)(((unsigned int)res[m_idx].rgbV.r * (w - 1) + p.r) / w);
+            res[m_idx].rgbV.g = (uint8_t)(((unsigned int)res[m_idx].rgbV.g * (w - 1) + p.g) / w);
+            res[m_idx].rgbV.b = (uint8_t)(((unsigned int)res[m_idx].rgbV.b * (w - 1) + p.b) / w);
         }
-        int dr = abs((int)p.r - (int)res[idx][j].rgbV.r);
-        int dg = abs((int)p.g - (int)res[idx][j].rgbV.g);
-        int db = abs((int)p.b - (int)res[idx][j].rgbV.b);
-        if (dr + dg + db < THRESHOLD)
+        else
         {
-            return j;
+            res[m_idx].rgbV.r = (uint8_t)(((unsigned int)res[m_idx].rgbV.r * (MAX_WEIGHTS - 1) + p.r) / MAX_WEIGHTS);
+            res[m_idx].rgbV.g = (uint8_t)(((unsigned int)res[m_idx].rgbV.g * (MAX_WEIGHTS - 1) + p.g) / MAX_WEIGHTS);
+            res[m_idx].rgbV.b = (uint8_t)(((unsigned int)res[m_idx].rgbV.b * (MAX_WEIGHTS - 1) + p.b) / MAX_WEIGHTS);
+        }
+
+        line_ptr[0] = 0;
+        line_ptr[1] = 0;
+        line_ptr[2] = 0;
+    }
+    else if (m_idx != -1 && res[m_idx].w == 0)
+    {
+        res[m_idx].rgbV = p;
+        res[m_idx].w = 1;
+    }
+    else // Cas 3 : aucune correspondance, aucun slot vide
+    {
+        int min_idx = min_reservoir(res);
+
+        unsigned int total_w = 0;
+        for (int i = 0; i < K; i++)
+            total_w += res[i].w;
+
+        if (rand_val * total_w >= res[min_idx].w)
+        {
+            res[min_idx].rgbV = p;
+            res[min_idx].w = 1;
         }
     }
-    return -1;
+
+#define BG_MIN_WEIGHT 30
+    int score = 255;
+    bool found_established = false;
+
+    for (int i = 0; i < K; i++)
+    {
+        if (res[i].w >= BG_MIN_WEIGHT)
+        {
+            found_established = true;
+            int d = max(
+                abs((int)p.r - (int)res[i].rgbV.r),
+                max(
+                    abs((int)p.g - (int)res[i].rgbV.g),
+                    abs((int)p.b - (int)res[i].rgbV.b)
+                )
+            );
+            score = min(score, d);
+        }
+    }
+
+    if (!found_established)
+    {
+        int max_idx = 0;
+        for (int i = 1; i < K; i++)
+            if (res[i].w > res[max_idx].w)
+                max_idx = i;
+
+        rgb bg = res[max_idx].rgbV;
+        score = max(
+            abs((int)p.r - (int)bg.r),
+            max(
+                abs((int)p.g - (int)bg.g),
+                abs((int)p.b - (int)bg.b)
+            )
+        );
+    }
+
+    uint8_t value = (uint8_t)min(score, 255);
+    line_ptr[0] = value;
+    line_ptr[1] = value;
+    line_ptr[2] = value;
 }
 
 namespace
@@ -178,34 +269,8 @@ void difference(uint8_t* buffer, int width, int height, int stride,
         }
 
         assert(sizeof(rgb) == pixel_stride);
-        std::byte* dBuffer;
-        size_t pitch;
-
-        cudaError_t err;
-
-        err = cudaMallocPitch(&dBuffer, &pitch, width * sizeof(rgb), height);
-        CHECK_CUDA_ERROR(err);
-
-        err = cudaMemcpy2D(dBuffer, pitch, src_buffer, src_stride,
-                           width * sizeof(rgb), height, cudaMemcpyDefault);
-        CHECK_CUDA_ERROR(err);
-
-        dim3 blockSize(16, 16);
-        dim3 gridSize((width + (blockSize.x - 1)) / blockSize.x,
-                      (height + (blockSize.y - 1)) / blockSize.y);
-
-        remove_red_channel_inp<<<gridSize, blockSize>>>(dBuffer, width, height,
-                                                        pitch);
-
-        err = cudaMemcpy2D(src_buffer, src_stride, dBuffer, pitch,
-                           width * sizeof(rgb), height, cudaMemcpyDefault);
-        CHECK_CUDA_ERROR(err);
-
-        cudaFree(dBuffer);
-
-        err = cudaDeviceSynchronize();
-        CHECK_CUDA_ERROR(err);
-
+        difference(src_buffer, width, height, src_stride, pixel_stride);
+        CHECK_CUDA_ERROR(cudaDeviceSynchronize());
         {
             using namespace std::chrono_literals;
             // std::this_thread::sleep_for(100ms);
