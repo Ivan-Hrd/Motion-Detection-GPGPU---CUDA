@@ -335,14 +335,46 @@ void difference(uint8_t* buffer, int width, int height, int stride,
 }
 
 
-extern "C" {
+extern "C" 
+{
     void filter_impl(uint8_t* src_buffer, int width, int height, int src_stride, int pixel_stride)
     {
         load_logo();
+        if (rs == nullptr || res_width == 0 || res_height == 0)
+        {
+            if (rs != nullptr)
+            {
+                cudaFree(rs);
+            }
+
+
+            res_width = width;
+            res_height = height;
+
+            CHECK_CUDA_ERROR(
+                cudaMalloc(&rs, width * height * K * sizeof(reservoir)));
+            CHECK_CUDA_ERROR(
+                cudaMemset(rs, 0, width * height * K * sizeof(reservoir)));
+        }
+
+        assert(sizeof(rgb) == pixel_stride);
+        difference(src_buffer, width, height, src_stride, pixel_stride);
+        CHECK_CUDA_ERROR(cudaDeviceSynchronize());
 
         assert(sizeof(rgb) == pixel_stride);
         uint8_t* dBuffer;
         size_t pitch;
+
+        cudaError_t err;
+        
+        err = cudaMallocPitch(&dBuffer, &pitch, width * sizeof(rgb), height);
+        CHECK_CUDA_ERROR(err);
+
+        err = cudaMemcpy2D(dBuffer, pitch, src_buffer, src_stride, width * sizeof(rgb), height, cudaMemcpyDefault);
+        CHECK_CUDA_ERROR(err);
+
+        dim3 blockSize(16,16);
+        dim3 gridSize((width + (blockSize.x - 1)) / blockSize.x, (height + (blockSize.y - 1)) / blockSize.y);
 
         // STEP 3 : Hysteresis
         bool* marker;
@@ -374,39 +406,18 @@ extern "C" {
             CHECK_CUDA_ERROR(err);
         }
         //remove_red_channel_inp<<<gridSize, blockSize>>>(dBuffer, width, height, pitch);
+        
 
-    extern "C"
-{
-    void filter_impl(uint8_t* src_buffer, int width, int height, int src_stride,
-                     int pixel_stride)
-    {
-        load_logo();
+        err = cudaMemcpy2D(src_buffer, src_stride, dBuffer, pitch, width * sizeof(rgb), height, cudaMemcpyDefault);
+        CHECK_CUDA_ERROR(err);
 
-        if (rs == nullptr || res_width == 0 || res_height == 0)
-        {
-            if (rs != nullptr)
-            {
-                cudaFree(rs);
-            }
         cudaFree(dBuffer);
         cudaFree(marker);
         cudaFree(candidate);
+        
+        err = cudaDeviceSynchronize();
+        CHECK_CUDA_ERROR(err);
 
-            res_width = width;
-            res_height = height;
 
-            CHECK_CUDA_ERROR(
-                cudaMalloc(&rs, width * height * K * sizeof(reservoir)));
-            CHECK_CUDA_ERROR(
-                cudaMemset(rs, 0, width * height * K * sizeof(reservoir)));
-        }
-
-        assert(sizeof(rgb) == pixel_stride);
-        difference(src_buffer, width, height, src_stride, pixel_stride);
-        CHECK_CUDA_ERROR(cudaDeviceSynchronize());
-        {
-            using namespace std::chrono_literals;
-            // std::this_thread::sleep_for(100ms);
-        }
     }
 }
