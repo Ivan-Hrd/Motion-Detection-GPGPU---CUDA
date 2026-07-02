@@ -334,11 +334,27 @@ void difference(uint8_t* buffer, int width, int height, int stride,
     cudaFree(dev_buffer);
 }
 
+void cleanup()
+{
+    if (rs != nullptr)
+    {
+        cudaFree(rs);
+        rs = nullptr;
+    }
+}
+
 
 extern "C" 
 {
     void filter_impl(uint8_t* src_buffer, int width, int height, int src_stride, int pixel_stride)
     {
+        static bool registered = false;
+        if (!registered)
+        {
+            atexit(cleanup);
+            registered = true;
+        }
+
         load_logo();
         if (rs == nullptr || res_width == 0 || res_height == 0)
         {
