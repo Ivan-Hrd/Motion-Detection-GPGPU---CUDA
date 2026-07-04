@@ -228,8 +228,10 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
     }
     else // Cas 3 : aucune correspondance, aucun slot vide
     {
-        int min_idx = min_reservoir(res);
-
+        int min_idx = 0;
+        for (int i = 1; i < K; i++)
+            if (res[i].w < res[min_idx].w)
+                min_idx = i;
         unsigned int total_w = 0;
         for (int i = 0; i < K; i++)
             total_w += res[i].w;
@@ -467,18 +469,19 @@ extern "C"
         dim3 blockSize(16,16);
         dim3 gridSize((width + (blockSize.x - 1)) / blockSize.x, (height + (blockSize.y - 1)) / blockSize.y);
 
-	// STEP2: Ouverture 
-	uint8_t* eroded;
-	err = cudaMallloc(&eroded,width * sizeof(uint8_t) * height);
-	CHECK_CUDA_ERROR(err);
-	erosion_kernel<<<gridSize,blockSize>>>(dBuffer,eroded,width,height,pitch,pixel_stride,RADIUS);
+	    // STEP2: Ouverture
+	    uint8_t* eroded;
+	    err = cudaMalloc(&eroded,width * sizeof(uint8_t) * height);
+	    CHECK_CUDA_ERROR(err);
+	    erosion_kernel<<<gridSize,blockSize>>>(dBuffer,eroded,width,height,pitch,pixel_stride,RADIUS);
 
-	cudaCheckError();
+	    cudaCheckError();
 
-	dilatation_kernel<<<gridSize,blockSize>>>(eroded,dBuffer,width,height,pitch,pixel_stride,RADIUS);
+	    dilatation_kernel<<<gridSize,blockSize>>>(eroded,dBuffer,width,height,pitch,pixel_stride,RADIUS);
 
-	cudaCheckError();
-	cudaFree(eroded);
+	    cudaCheckError();
+	    cudaFree(eroded);
+
         // STEP 3 : Hysteresis
         bool* marker;
         err = cudaMalloc(&marker, width * sizeof(bool) * height);
@@ -499,13 +502,13 @@ extern "C"
         bool changed_host = true;
         while (changed_host) {
             changed_host = false;
-            err = cudaMemset(&d_changed, changed_host, sizeof(bool));
+            err = cudaMemset(d_changed, changed_host, sizeof(bool));
             CHECK_CUDA_ERROR(err);
 
             hysteresis_propagation<<<gridSize, blockSize>>>(dBuffer, marker, candidate, width, height, pitch, pixel_stride, d_changed);
             cudaCheckError();
 
-            err = cudaMemcpy(&changed_host, &d_changed, sizeof(bool), cudaMemcpyDeviceToHost);
+            err = cudaMemcpy(&changed_host, d_changed, sizeof(bool), cudaMemcpyDeviceToHost);
             CHECK_CUDA_ERROR(err);
         }
         //remove_red_channel_inp<<<gridSize, blockSize>>>(dBuffer, width, height, pitch);
