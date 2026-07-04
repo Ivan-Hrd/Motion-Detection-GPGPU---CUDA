@@ -8,6 +8,7 @@
 
 #define LOW 30
 #define HIGH 40
+#define RADIUS 1
 #define cudaCheckError() {                                                                       \
     cudaError_t e=cudaGetLastError();                                                        \
     if(e!=cudaSuccess) {                                                                     \
@@ -103,6 +104,79 @@ __device__ int matching_reservoir(rgb p, reservoir* res)
     return empty;
 }
 
+__device__ uint8_t get_gray_pixel(uint8_t* buffer, int x, int y, int stride, int pixel_stride)
+{
+    uint8_t* pixel = buffer + y * stride + x * pixel_stride;
+    return pixel[0];
+}
+__global__ void erosion_kernel(uint8_t* buffer,uint8_t * eroded,  int width, int height, int stride,int pixel_stride,int radius)
+{
+
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height)
+    {
+        return;
+    }
+    uint8_t min_value = 255;
+    for (int dy = -radius; dy <= radius; dy++)
+    {
+	    int yy = y + dy;
+	    if (yy < 0 || yy >= height)
+	    {
+	    	continue;
+	    }
+	    for (int dx = -radius; dx <= radius;dx++)
+	    {
+		    int xx = x + dx;
+		    if (xx < 0 || xx >= width)
+		    {
+			    continue;
+		    }
+		    
+		    uint8_t value = get_gray_pixel(buffer,xx,yy,stride,pixel_stride); 
+		    min_value = min(min_value,value);
+	    }
+    }
+    eroded[y * width + x] = min_value;    
+}
+
+
+__global__ void dilatation_kernel(const uint8_t * input,uint8_t* output, int width, int height, int stride, int pixel_stride,int radius)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height)
+        return;
+    uint8_t max_value = 0;
+    for (int dy = -radius; dy <= radius; dy++)
+    {
+	    int yy = y + dy;
+	    if (yy < 0 || yy >= height)
+	    {
+	    	continue;
+	    }
+	    for (int dx = -radius; dx <= radius;dx++)
+	    {
+		    int xx = x + dx;
+		    if (xx < 0 || xx >= width)
+		    {
+			    continue;
+		    }
+		    
+		    uint8_t value = input[yy * width + xx]; 
+		    max_value = max(max_value,value);
+	    }
+    }
+    int idx =  y * stride + x * pixel_stride;
+    output[idx] = max_value;
+    output[idx + 1] = max_value;
+    output[idx + 2] = max_value;
+     
+}
+
+
 __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
                                   int width, int height, int stride,
                                   int pixel_stride)
@@ -154,8 +228,10 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
     }
     else // Cas 3 : aucune correspondance, aucun slot vide
     {
-        int min_idx = min_reservoir(res);
-
+        int min_idx = 0;
+        for (int i = 1; i < K; i++)
+            if (res[i].w < res[min_idx].w)
+                min_idx = i;
         unsigned int total_w = 0;
         for (int i = 0; i < K; i++)
             total_w += res[i].w;
@@ -377,6 +453,7 @@ extern "C"
         difference(src_buffer, width, height, src_stride, pixel_stride);
         CHECK_CUDA_ERROR(cudaDeviceSynchronize());
 
+
         assert(sizeof(rgb) == pixel_stride);
         uint8_t* dBuffer;
         size_t pitch;
@@ -391,6 +468,19 @@ extern "C"
 
         dim3 blockSize(16,16);
         dim3 gridSize((width + (blockSize.x - 1)) / blockSize.x, (height + (blockSize.y - 1)) / blockSize.y);
+
+	    // STEP2: Ouverture
+	    uint8_t* eroded;
+	    err = cudaMalloc(&eroded,width * sizeof(uint8_t) * height);
+	    CHECK_CUDA_ERROR(err);
+	    erosion_kernel<<<gridSize,blockSize>>>(dBuffer,eroded,width,height,pitch,pixel_stride,RADIUS);
+
+	    cudaCheckError();
+
+	    dilatation_kernel<<<gridSize,blockSize>>>(eroded,dBuffer,width,height,pitch,pixel_stride,RADIUS);
+
+	    cudaCheckError();
+	    cudaFree(eroded);
 
         // STEP 3 : Hysteresis
         bool* marker;
@@ -412,13 +502,13 @@ extern "C"
         bool changed_host = true;
         while (changed_host) {
             changed_host = false;
-            err = cudaMemset(&d_changed, changed_host, sizeof(bool));
+            err = cudaMemset(d_changed, changed_host, sizeof(bool));
             CHECK_CUDA_ERROR(err);
 
             hysteresis_propagation<<<gridSize, blockSize>>>(dBuffer, marker, candidate, width, height, pitch, pixel_stride, d_changed);
             cudaCheckError();
 
-            err = cudaMemcpy(&changed_host, &d_changed, sizeof(bool), cudaMemcpyDeviceToHost);
+            err = cudaMemcpy(&changed_host, d_changed, sizeof(bool), cudaMemcpyDeviceToHost);
             CHECK_CUDA_ERROR(err);
         }
         //remove_red_channel_inp<<<gridSize, blockSize>>>(dBuffer, width, height, pitch);
