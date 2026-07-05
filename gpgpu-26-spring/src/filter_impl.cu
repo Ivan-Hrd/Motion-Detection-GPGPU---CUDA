@@ -47,6 +47,12 @@ const int MAX_WEIGHTS = 100;
 const int THRESHOLD = 30;
 
 reservoir* rs = nullptr;
+uint8_t* dBuffer = nullptr;
+bool* marker = nullptr;
+bool* candidate = nullptr;
+bool* d_changed = nullptr;
+uint8_t* eroded = nullptr;
+
 static int res_width = 0;
 static int res_height = 0;
 
@@ -397,17 +403,10 @@ namespace
 void difference(uint8_t* buffer, int width, int height, int stride,
                 int pixel_stride)
 {
-    uint8_t* dev_buffer;
-    cudaMalloc(&dev_buffer, height * stride);
-    cudaMemcpy(dev_buffer, buffer, height * stride, cudaMemcpyHostToDevice);
-  
-    dim3 blockSize(16, 16);
-    dim3 gridSize((width + 15)/16, (height + 15)/16);
+    dim3 blockSize(32, 32);
+    dim3 gridSize((width + 31)/32, (height + 31)/32);
 
-    difference_kernel <<<gridSize, blockSize>>> (dev_buffer, rs, width, height, stride, pixel_stride);
-
-    cudaMemcpy(buffer, dev_buffer, height * stride, cudaMemcpyDeviceToHost);
-    cudaFree(dev_buffer);
+    difference_kernel <<<gridSize, blockSize>>> (buffer, rs, width, height, stride, pixel_stride);
 }
 
 void cleanup()
@@ -417,6 +416,26 @@ void cleanup()
         cudaFree(rs);
         rs = nullptr;
     }
+    if (dBuffer != nullptr) {
+        cudaFree(dBuffer);
+        dBuffer = nullptr;
+    }
+    if (marker != nullptr) {
+        cudaFree(marker);
+        marker = nullptr;
+    }
+    if (candidate != nullptr) {
+        cudaFree(candidate);
+        candidate = nullptr;
+    }
+    if (d_changed != nullptr) {
+        cudaFree(d_changed);
+        d_changed = nullptr;
+    }
+    if (eroded != nullptr) {
+        cudaFree(eroded);
+        eroded = nullptr;
+    }
 }
 
 
@@ -425,13 +444,26 @@ extern "C"
     void filter_impl(uint8_t* src_buffer, int width, int height, int src_stride, int pixel_stride)
     {
         static bool registered = false;
+        assert(sizeof(rgb) == pixel_stride);
+        static size_t pitch;
+
+        cudaError_t err;
         if (!registered)
         {
             atexit(cleanup);
             registered = true;
+            err = cudaMallocPitch(&dBuffer, &pitch, width * sizeof(rgb), height);
+            CHECK_CUDA_ERROR(err);
+            CHECK_CUDA_ERROR(cudaMalloc(&marker, width * height * sizeof(bool)));
+            CHECK_CUDA_ERROR(cudaMalloc(&candidate, width * height * sizeof(bool)));
+            CHECK_CUDA_ERROR(cudaMalloc(&d_changed, sizeof(bool)));
+            err = cudaMalloc(&eroded,width * sizeof(uint8_t) * height);
+            CHECK_CUDA_ERROR(err);
+
+            CHECK_CUDA_ERROR(cudaDeviceSynchronize());
         }
 
-        load_logo();
+        // load_logo();
         if (rs == nullptr || res_width == 0 || res_height == 0)
         {
             if (rs != nullptr)
@@ -447,32 +479,21 @@ extern "C"
                 cudaMalloc(&rs, width * height * K * sizeof(reservoir)));
             CHECK_CUDA_ERROR(
                 cudaMemset(rs, 0, width * height * K * sizeof(reservoir)));
+
         }
-
-        assert(sizeof(rgb) == pixel_stride);
-        difference(src_buffer, width, height, src_stride, pixel_stride);
-        CHECK_CUDA_ERROR(cudaDeviceSynchronize());
-
-
-        assert(sizeof(rgb) == pixel_stride);
-        uint8_t* dBuffer;
-        size_t pitch;
-
-        cudaError_t err;
-        
-        err = cudaMallocPitch(&dBuffer, &pitch, width * sizeof(rgb), height);
-        CHECK_CUDA_ERROR(err);
 
         err = cudaMemcpy2D(dBuffer, pitch, src_buffer, src_stride, width * sizeof(rgb), height, cudaMemcpyDefault);
         CHECK_CUDA_ERROR(err);
 
-        dim3 blockSize(16,16);
+        assert(sizeof(rgb) == pixel_stride);
+        difference(dBuffer, width, height, pitch, pixel_stride);
+        CHECK_CUDA_ERROR(cudaDeviceSynchronize());
+
+
+        dim3 blockSize(32,32);
         dim3 gridSize((width + (blockSize.x - 1)) / blockSize.x, (height + (blockSize.y - 1)) / blockSize.y);
 
 	    // STEP2: Ouverture
-	    uint8_t* eroded;
-	    err = cudaMalloc(&eroded,width * sizeof(uint8_t) * height);
-	    CHECK_CUDA_ERROR(err);
 	    erosion_kernel<<<gridSize,blockSize>>>(dBuffer,eroded,width,height,pitch,pixel_stride,RADIUS);
 
 	    cudaCheckError();
@@ -480,24 +501,11 @@ extern "C"
 	    dilatation_kernel<<<gridSize,blockSize>>>(eroded,dBuffer,width,height,pitch,pixel_stride,RADIUS);
 
 	    cudaCheckError();
-	    cudaFree(eroded);
 
         // STEP 3 : Hysteresis
-        bool* marker;
-        err = cudaMalloc(&marker, width * sizeof(bool) * height);
-        CHECK_CUDA_ERROR(err);
-
-        bool* candidate;
-        err = cudaMalloc(&candidate, width * sizeof(bool) * height);
-        CHECK_CUDA_ERROR(err);
-
         hysteresis_init<<<gridSize, blockSize>>>(dBuffer, marker, candidate, width, height, pitch, pixel_stride);
         cudaDeviceSynchronize();
         cudaCheckError();
-
-        bool* d_changed;
-        err = cudaMalloc(&d_changed, sizeof(bool));
-        CHECK_CUDA_ERROR(err);
 
         bool changed_host = true;
         while (changed_host) {
@@ -516,10 +524,6 @@ extern "C"
 
         err = cudaMemcpy2D(src_buffer, src_stride, dBuffer, pitch, width * sizeof(rgb), height, cudaMemcpyDefault);
         CHECK_CUDA_ERROR(err);
-
-        cudaFree(dBuffer);
-        cudaFree(marker);
-        cudaFree(candidate);
         
         err = cudaDeviceSynchronize();
         CHECK_CUDA_ERROR(err);
