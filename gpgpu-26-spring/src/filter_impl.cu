@@ -87,21 +87,27 @@ __global__ void remove_red_channel_inp(std::byte* buffer, int width, int height,
     }
 }
 
-__device__ int matching_reservoir(rgb p, reservoir* res)
+__device__ int matching_reservoir(rgb p, reservoir* res, int width, int height)
 {
     int empty = -1;
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int size = width * height;
+    int idx = y * width + x;
+
     for (int j = 0; j < K; j++)
     {
-        if (res[j].w == 0)
+        reservoir r = res[j*size+idx];
+        if (r.w == 0)
         {
             if (empty == -1) {
                 empty = j;
             }
             continue;
         }
-        int dr = abs((int)p.r - (int)res[j].rgbV.r);
-        int dg = abs((int)p.g - (int)res[j].rgbV.g);
-        int db = abs((int)p.b - (int)res[j].rgbV.b);
+        int dr = abs((int)p.r - (int)r.rgbV.r);
+        int dg = abs((int)p.g - (int)r.rgbV.g);
+        int db = abs((int)p.b - (int)r.rgbV.b);
         if (dr + dg + db < THRESHOLD)
         {
             return j;
@@ -198,54 +204,53 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
     uint8_t* line_ptr = buffer + y * stride + x * pixel_stride;
     rgb p = { line_ptr[0], line_ptr[1], line_ptr[2] };
 
-    reservoir* res = reservoirs + idx * K;
-
-    int m_idx = matching_reservoir(p, res);
+    int m_idx = matching_reservoir(p, reservoirs, width, height);
 
     unsigned int seed = idx * 1234567 + threadIdx.x; // pour le rapport parler de ça ptetre
     float rand_val = (seed % 1000) / 1000.0f;
 
-    if (m_idx != -1 && res[m_idx].w > 0)
+    int global_idx = m_idx*height*width+idx;
+    if (m_idx != -1 && reservoirs[global_idx].w > 0)
     {
-        unsigned int w = res[m_idx].w;
+        unsigned int w = reservoirs[global_idx].w;
         if (w < MAX_WEIGHTS)
         {
-            res[m_idx].w++;
-            w = res[m_idx].w;
-            res[m_idx].rgbV.r = (uint8_t)(((unsigned int)res[m_idx].rgbV.r * (w - 1) + p.r) / w);
-            res[m_idx].rgbV.g = (uint8_t)(((unsigned int)res[m_idx].rgbV.g * (w - 1) + p.g) / w);
-            res[m_idx].rgbV.b = (uint8_t)(((unsigned int)res[m_idx].rgbV.b * (w - 1) + p.b) / w);
+            reservoirs[global_idx].w++;
+            w = reservoirs[global_idx].w;
+            reservoirs[global_idx].rgbV.r = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.r * (w - 1) + p.r) / w);
+            reservoirs[global_idx].rgbV.g = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.g * (w - 1) + p.g) / w);
+            reservoirs[global_idx].rgbV.b = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.b * (w - 1) + p.b) / w);
         }
         else
         {
-            res[m_idx].rgbV.r = (uint8_t)(((unsigned int)res[m_idx].rgbV.r * (MAX_WEIGHTS - 1) + p.r) / MAX_WEIGHTS);
-            res[m_idx].rgbV.g = (uint8_t)(((unsigned int)res[m_idx].rgbV.g * (MAX_WEIGHTS - 1) + p.g) / MAX_WEIGHTS);
-            res[m_idx].rgbV.b = (uint8_t)(((unsigned int)res[m_idx].rgbV.b * (MAX_WEIGHTS - 1) + p.b) / MAX_WEIGHTS);
+            reservoirs[global_idx].rgbV.r = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.r * (MAX_WEIGHTS - 1) + p.r) / MAX_WEIGHTS);
+            reservoirs[global_idx].rgbV.g = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.g * (MAX_WEIGHTS - 1) + p.g) / MAX_WEIGHTS);
+            reservoirs[global_idx].rgbV.b = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.b * (MAX_WEIGHTS - 1) + p.b) / MAX_WEIGHTS);
         }
 
         line_ptr[0] = 0;
         line_ptr[1] = 0;
         line_ptr[2] = 0;
     }
-    else if (m_idx != -1 && res[m_idx].w == 0)
+    else if (m_idx != -1 && reservoirs[global_idx].w == 0)
     {
-        res[m_idx].rgbV = p;
-        res[m_idx].w = 1;
+        reservoirs[global_idx].rgbV = p;
+        reservoirs[global_idx].w = 1;
     }
     else // Cas 3 : aucune correspondance, aucun slot vide
     {
         int min_idx = 0;
         for (int i = 1; i < K; i++)
-            if (res[i].w < res[min_idx].w)
+            if (reservoirs[height*width*i+idx].w < reservoirs[height*width*min_idx+idx].w)
                 min_idx = i;
         unsigned int total_w = 0;
         for (int i = 0; i < K; i++)
-            total_w += res[i].w;
+            total_w += reservoirs[height*width*i+idx].w;
 
-        if (rand_val * total_w >= res[min_idx].w)
+        if (rand_val * total_w >= reservoirs[height*width*min_idx+idx].w)
         {
-            res[min_idx].rgbV = p;
-            res[min_idx].w = 1;
+            reservoirs[height*width*min_idx+idx].rgbV = p;
+            reservoirs[height*width*min_idx+idx].w = 1;
         }
     }
 
@@ -255,14 +260,14 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
 
     for (int i = 0; i < K; i++)
     {
-        if (res[i].w >= BG_MIN_WEIGHT)
+        if (reservoirs[height*width*i+idx].w >= BG_MIN_WEIGHT)
         {
             found_established = true;
             int d = max(
-                abs((int)p.r - (int)res[i].rgbV.r),
+                abs((int)p.r - (int)reservoirs[height*width*i+idx].rgbV.r),
                 max(
-                    abs((int)p.g - (int)res[i].rgbV.g),
-                    abs((int)p.b - (int)res[i].rgbV.b)
+                    abs((int)p.g - (int)reservoirs[height*width*i+idx].rgbV.g),
+                    abs((int)p.b - (int)reservoirs[height*width*i+idx].rgbV.b)
                 )
             );
             score = min(score, d);
@@ -273,10 +278,10 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
     {
         int max_idx = 0;
         for (int i = 1; i < K; i++)
-            if (res[i].w > res[max_idx].w)
+            if (reservoirs[height*width*i+idx].w > reservoirs[height*width*max_idx+idx].w)
                 max_idx = i;
 
-        rgb bg = res[max_idx].rgbV;
+        rgb bg = reservoirs[height*width*max_idx+idx].rgbV;
         score = max(
             abs((int)p.r - (int)bg.r),
             max(
