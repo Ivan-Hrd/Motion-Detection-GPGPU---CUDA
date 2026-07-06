@@ -18,7 +18,7 @@ set_target_properties(gstcudafilter-base PROPERTIES POSITION_INDEPENDENT_CODE ON
 
 # FILTRE en CUDA
 add_library(gstcudafilter-cu SHARED src/filter_impl.h src/filter_impl.cu)
-target_link_libraries(gstcudafilter-cu PkgConfig::GStreamerVideo gstcudafilter-base)
+target_link_libraries(gstcudafilter-cu PkgConfig::GStreamerVideo gstcudafilter-base curand)
 
 # FILTRE EN C++
 add_library(gstcudafilter-cpp SHARED src/filter_impl.h src/filter_impl.cpp)

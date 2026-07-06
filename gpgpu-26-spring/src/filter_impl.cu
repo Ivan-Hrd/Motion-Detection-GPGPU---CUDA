@@ -5,6 +5,7 @@
 
 #include "filter_impl.h"
 #include "logo.h"
+#include "curand_kernel.h"
 
 #define LOW 30
 #define HIGH 40
@@ -49,6 +50,18 @@ const int THRESHOLD = 30;
 reservoir* rs = nullptr;
 static int res_width = 0;
 static int res_height = 0;
+
+static curandState* rng_states = nullptr;
+
+__global__ void init_rng(curandState* states, int width, int height)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    curand_init(idx, 0, 0, &states[idx]);
+}
 
 __constant__ uint8_t* logo;
 /// @brief Black out the red channel from the video and add EPITA's logo
@@ -178,6 +191,7 @@ __global__ void dilatation_kernel(const uint8_t * input,uint8_t* output, int wid
 
 
 __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
+                                  curandState* states,
                                   int width, int height, int stride,
                                   int pixel_stride)
 {
@@ -196,9 +210,8 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
 
     int m_idx = matching_reservoir(p, res);
 
-    unsigned int seed = idx * 1234567 + threadIdx.x; // pour le rapport parler de ça ptetre
-    float rand_val = (seed % 1000) / 1000.0f;
-
+    float rand_val = curand_uniform(&states[idx]);
+    
     if (m_idx != -1 && res[m_idx].w > 0)
     {
         unsigned int w = res[m_idx].w;
@@ -400,11 +413,12 @@ void difference(uint8_t* buffer, int width, int height, int stride,
     uint8_t* dev_buffer;
     cudaMalloc(&dev_buffer, height * stride);
     cudaMemcpy(dev_buffer, buffer, height * stride, cudaMemcpyHostToDevice);
-  
+
     dim3 blockSize(16, 16);
     dim3 gridSize((width + 15)/16, (height + 15)/16);
 
-    difference_kernel <<<gridSize, blockSize>>> (dev_buffer, rs, width, height, stride, pixel_stride);
+    difference_kernel<<<gridSize, blockSize>>>(dev_buffer, rs, rng_states,
+                                               width, height, stride, pixel_stride);
 
     cudaMemcpy(buffer, dev_buffer, height * stride, cudaMemcpyDeviceToHost);
     cudaFree(dev_buffer);
@@ -416,6 +430,8 @@ void cleanup()
     {
         cudaFree(rs);
         rs = nullptr;
+        cudaFree(rng_states);
+        rng_states = nullptr;
     }
 }
 
@@ -432,6 +448,10 @@ extern "C"
         }
 
         load_logo();
+
+        dim3 blockSize(16,16);
+        dim3 gridSize((width + (blockSize.x - 1)) / blockSize.x, (height + (blockSize.y - 1)) / blockSize.y);
+
         if (rs == nullptr || res_width == 0 || res_height == 0)
         {
             if (rs != nullptr)
@@ -447,6 +467,11 @@ extern "C"
                 cudaMalloc(&rs, width * height * K * sizeof(reservoir)));
             CHECK_CUDA_ERROR(
                 cudaMemset(rs, 0, width * height * K * sizeof(reservoir)));
+
+            CHECK_CUDA_ERROR(cudaMalloc(&rng_states, width * height * sizeof(curandState)));
+            init_rng<<<gridSize, blockSize>>>(rng_states, width, height);
+            CHECK_CUDA_ERROR(cudaDeviceSynchronize());
+
         }
 
         assert(sizeof(rgb) == pixel_stride);
@@ -454,7 +479,6 @@ extern "C"
         CHECK_CUDA_ERROR(cudaDeviceSynchronize());
 
 
-        assert(sizeof(rgb) == pixel_stride);
         uint8_t* dBuffer;
         size_t pitch;
 
@@ -465,9 +489,6 @@ extern "C"
 
         err = cudaMemcpy2D(dBuffer, pitch, src_buffer, src_stride, width * sizeof(rgb), height, cudaMemcpyDefault);
         CHECK_CUDA_ERROR(err);
-
-        dim3 blockSize(16,16);
-        dim3 gridSize((width + (blockSize.x - 1)) / blockSize.x, (height + (blockSize.y - 1)) / blockSize.y);
 
 	    // STEP2: Ouverture
 	    uint8_t* eroded;
@@ -520,6 +541,7 @@ extern "C"
         cudaFree(dBuffer);
         cudaFree(marker);
         cudaFree(candidate);
+        cudaFree(d_changed);
         
         err = cudaDeviceSynchronize();
         CHECK_CUDA_ERROR(err);
