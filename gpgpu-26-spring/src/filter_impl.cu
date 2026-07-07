@@ -53,6 +53,25 @@ static int res_height = 0;
 
 static curandState* rng_states = nullptr;
 
+__global__ void masquage(uint8_t* input,uint8_t*mask, int width, int height,int input_stride,int mask_stride, int pixel_stride)
+{
+    rgb red = {255,0,0};
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height)
+        return;
+
+    uint8_t* lineptr = input + y * input_stride + x * pixel_stride;
+    uint8_t* maskptr = mask + y * mask_stride + x * pixel_stride;
+
+    // partie rouge mis entre 0 et 1 (facteur)
+    float m = maskptr[0] / 255.0f;
+
+    lineptr[0] = (uint8_t)min(255.0f,(lineptr[0] + 0.5f * red.r * m));
+
+}
+
 __global__ void init_rng(curandState* states, int width, int height)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -474,20 +493,31 @@ extern "C"
 
         }
 
+        uint8_t* dBuffer;
+        uint8_t* dOriginal;
+        size_t pitch;
+        size_t original_pitch;
+
+        cudaError_t err;
+
+        err = cudaMallocPitch(&dOriginal, &original_pitch, width * sizeof(rgb), height);
+        CHECK_CUDA_ERROR(err);
+
+        err = cudaMemcpy2D(dOriginal, original_pitch, src_buffer, src_stride, width * sizeof(rgb), height, cudaMemcpyDefault);
+        CHECK_CUDA_ERROR(err);
+
+        // STEP 1 : difference
         assert(sizeof(rgb) == pixel_stride);
         difference(src_buffer, width, height, src_stride, pixel_stride);
         CHECK_CUDA_ERROR(cudaDeviceSynchronize());
 
 
-        uint8_t* dBuffer;
-        size_t pitch;
 
-        cudaError_t err;
-        
+
         err = cudaMallocPitch(&dBuffer, &pitch, width * sizeof(rgb), height);
         CHECK_CUDA_ERROR(err);
 
-        err = cudaMemcpy2D(dBuffer, pitch, src_buffer, src_stride, width * sizeof(rgb), height, cudaMemcpyDefault);
+        err = cudaMemcpy2D(dBuffer, pitch, src_buffer, src_stride, width * sizeof(rgb), height, cudaMemcpyHostToDevice);
         CHECK_CUDA_ERROR(err);
 
 	    // STEP2: Ouverture
@@ -534,10 +564,14 @@ extern "C"
         }
         //remove_red_channel_inp<<<gridSize, blockSize>>>(dBuffer, width, height, pitch);
         
+        masquage<<<gridSize,blockSize>>>(dOriginal,dBuffer,width,height,original_pitch, pitch,pixel_stride);
+        cudaDeviceSynchronize();
+        cudaCheckError();
 
-        err = cudaMemcpy2D(src_buffer, src_stride, dBuffer, pitch, width * sizeof(rgb), height, cudaMemcpyDefault);
+        err = cudaMemcpy2D(src_buffer, src_stride, dOriginal, original_pitch, width * sizeof(rgb), height, cudaMemcpyDefault);
         CHECK_CUDA_ERROR(err);
 
+        cudaFree(dOriginal);
         cudaFree(dBuffer);
         cudaFree(marker);
         cudaFree(candidate);
