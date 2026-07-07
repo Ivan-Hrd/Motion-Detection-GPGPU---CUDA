@@ -53,6 +53,7 @@ bool* candidate = nullptr;
 bool* d_changed = nullptr;
 uint8_t* dOriginal = nullptr;
 uint8_t* eroded = nullptr;
+int* d_count = nullptr;
 
 static int res_width = 0;
 static int res_height = 0;
@@ -363,7 +364,7 @@ __global__ void hysteresis_init(uint8_t* buffer, bool* marker, bool* candidate, 
 /// @param pixel_stride
 /// @param changed
 /// @return
-__global__ void hysteresis_propagation(uint8_t* buffer, const bool* marker, const bool* candidate, int width, int height, size_t stride, int pixel_stride, bool* changed) {
+__global__ void hysteresis_propagation(uint8_t* buffer, const bool* marker, const bool* candidate, int width, int height, size_t stride, int pixel_stride, int* changed_count) {
     unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height)
@@ -381,7 +382,7 @@ __global__ void hysteresis_propagation(uint8_t* buffer, const bool* marker, cons
         buffer[y * stride + x * pixel_stride + 1] = 255;
         buffer[y * stride + x * pixel_stride + 2] = 255;
 
-        *changed = true;
+        atomicAdd(changed_count, 1);
         return;
     }
 
@@ -401,7 +402,7 @@ __global__ void hysteresis_propagation(uint8_t* buffer, const bool* marker, cons
                 buffer[y * stride + x * pixel_stride + 1] = 255;
                 buffer[y * stride + x * pixel_stride + 2] = 255;
 
-                *changed = true;
+                atomicAdd(changed_count, 1);
                 break;
             }
         }
@@ -476,6 +477,10 @@ void cleanup()
         cudaFree(dOriginal);
         dOriginal = nullptr;
     }
+    if (d_count != nullptr) {
+        cudaFree(d_count);
+        d_count = nullptr;
+    }
 }
 
 
@@ -502,6 +507,7 @@ extern "C"
             CHECK_CUDA_ERROR(err);
             err = cudaMallocPitch(&dOriginal, &original_pitch, width * sizeof(rgb), height);
             CHECK_CUDA_ERROR(err);
+            CHECK_CUDA_ERROR(cudaMalloc(&d_count, sizeof(int)));
 
             CHECK_CUDA_ERROR(cudaDeviceSynchronize());
         }
@@ -551,17 +557,16 @@ extern "C"
         cudaDeviceSynchronize();
         cudaCheckError();
 
-        bool changed_host = true;
-        while (changed_host) {
-            changed_host = false;
-            err = cudaMemset(d_changed, changed_host, sizeof(bool));
-            CHECK_CUDA_ERROR(err);
+        int h_count = 1;
+        while (h_count > 0)
+        {
+            CHECK_CUDA_ERROR(cudaMemset(d_count, 0, sizeof(int)));
 
-            hysteresis_propagation<<<gridSize, blockSize>>>(dBuffer, marker, candidate, width, height, pitch, pixel_stride, d_changed);
+            hysteresis_propagation<<<gridSize, blockSize>>>(dBuffer, marker, candidate, width, height, pitch, pixel_stride, d_count);
             cudaCheckError();
 
-            err = cudaMemcpy(&changed_host, d_changed, sizeof(bool), cudaMemcpyDeviceToHost);
-            CHECK_CUDA_ERROR(err);
+            CHECK_CUDA_ERROR(cudaDeviceSynchronize());
+            CHECK_CUDA_ERROR(cudaMemcpy(&h_count, d_count, sizeof(int), cudaMemcpyDeviceToHost));
         }
         //remove_red_channel_inp<<<gridSize, blockSize>>>(dBuffer, width, height, pitch);
         
