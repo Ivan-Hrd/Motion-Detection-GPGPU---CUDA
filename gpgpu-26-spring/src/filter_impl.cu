@@ -247,8 +247,7 @@ __global__ void init_rand_states(curandState* states, int width, int height,
 
 __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs, curandState* states,
                                   int width, int height, int stride,
-                                  int pixel_stride, size_t pitch_rs,
-                                  curandState* rand_states)
+                                  int pixel_stride, size_t pitch_rs)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -264,7 +263,7 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs, curand
     int m_idx = matching_reservoir(p, reservoirs, width, height, static_cast<int>(pitch_rs));
 
 
-    float rand_val = curand_uniform(&rand_states[idx]);
+    float rand_val = curand_uniform(&states[idx]);
 
   
     int global_idx = m_idx*pitch_rs+idx*sizeof(reservoir);
@@ -482,11 +481,10 @@ void difference(uint8_t* buffer, int width, int height, int stride,
     dim3 blockSize(32, 32);
     dim3 gridSize((width + 31)/32, (height + 31)/32);
 
-    difference_kernel <<<gridSize, blockSize>>> (buffer, rs, width, height, stride, pixel_stride, pitch_rs, d_rand_states);
+    difference_kernel <<<gridSize, blockSize>>> (buffer, rs, d_rand_states, width, height, stride, pixel_stride, pitch_rs);
 }
 
-void cleanup()
-{
+void cleanup() {
     if (rs != nullptr)
     {
         cudaFree(rs);
@@ -519,15 +517,14 @@ void cleanup()
     if (d_count != nullptr) {
         cudaFree(d_count);
         d_count = nullptr;
-    if (d_rand_states != nullptr) {
-        cudaFree(d_rand_states);
-        d_rand_states = nullptr;
+        if (d_rand_states != nullptr) {
+            cudaFree(d_rand_states);
+            d_rand_states = nullptr;
+        }
     }
 }
 
-
-extern "C"
-{
+extern "C" {
     void filter_impl(uint8_t* src_buffer, int width, int height, int src_stride, int pixel_stride)
     {
         static bool registered = false;
@@ -592,14 +589,14 @@ extern "C"
         difference(dBuffer, width, height, pitch, pixel_stride, pitch_rs);
         CHECK_CUDA_ERROR(cudaDeviceSynchronize());
 
-	    // STEP2: Ouverture
-	    erosion_kernel<<<gridSize,blockSize>>>(dBuffer,eroded,width,height,pitch,pixel_stride,RADIUS);
+        // STEP2: Ouverture
+        erosion_kernel<<<gridSize,blockSize>>>(dBuffer,eroded,width,height,pitch,pixel_stride,RADIUS);
 
-	    cudaCheckError();
+        cudaCheckError();
 
-	    dilatation_kernel<<<gridSize,blockSize>>>(eroded,dBuffer,width,height,pitch,pixel_stride,RADIUS);
+        dilatation_kernel<<<gridSize,blockSize>>>(eroded,dBuffer,width,height,pitch,pixel_stride,RADIUS);
 
-	    cudaCheckError();
+        cudaCheckError();
 
         // STEP 3 : Hysteresis
         hysteresis_init<<<gridSize, blockSize>>>(dBuffer, marker, candidate, width, height, pitch, pixel_stride);
@@ -618,7 +615,7 @@ extern "C"
             CHECK_CUDA_ERROR(cudaMemcpy(&h_count, d_count, sizeof(int), cudaMemcpyDeviceToHost));
         }
         //remove_red_channel_inp<<<gridSize, blockSize>>>(dBuffer, width, height, pitch);
-        
+
         // STEP 4 : Masquage
         masquage<<<gridSize,blockSize>>>(dOriginal,dBuffer,width,height,original_pitch, pitch,pixel_stride);
         cudaDeviceSynchronize();
@@ -632,4 +629,5 @@ extern "C"
 
 
     }
+
 }
