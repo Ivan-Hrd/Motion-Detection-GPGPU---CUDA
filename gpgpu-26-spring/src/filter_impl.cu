@@ -2,10 +2,9 @@
 #include <chrono>
 #include <cstdio>
 #include <thread>
-
+#include "curand_kernel.h"
 #include "filter_impl.h"
 #include "logo.h"
-#include "curand_kernel.h"
 
 #define LOW 30
 #define HIGH 40
@@ -48,10 +47,36 @@ const int MAX_WEIGHTS = 100;
 const int THRESHOLD = 30;
 
 reservoir* rs = nullptr;
+uint8_t* dBuffer = nullptr;
+bool* marker = nullptr;
+bool* candidate = nullptr;
+int* d_changed = nullptr;
+uint8_t* dOriginal = nullptr;
+uint8_t* eroded = nullptr;
+
 static int res_width = 0;
 static int res_height = 0;
-
 static curandState* rng_states = nullptr;
+__constant__ uint8_t* logo;
+
+__global__ void masquage(uint8_t* input,uint8_t*mask, int width, int height,int input_stride,int mask_stride, int pixel_stride)
+{
+    rgb red = {255,0,0};
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height)
+        return;
+
+    uint8_t* lineptr = input + y * input_stride + x * pixel_stride;
+    uint8_t* maskptr = mask + y * mask_stride + x * pixel_stride;
+
+    // partie rouge mis entre 0 et 1 (facteur)
+    float m = maskptr[0] / 255.0f;
+
+    lineptr[0] = (uint8_t)min(255.0f,(lineptr[0] + 0.5f * red.r * m));
+
+}
 
 __global__ void init_rng(curandState* states, int width, int height)
 {
@@ -63,7 +88,7 @@ __global__ void init_rng(curandState* states, int width, int height)
     curand_init(idx, 0, 0, &states[idx]);
 }
 
-__constant__ uint8_t* logo;
+
 /// @brief Black out the red channel from the video and add EPITA's logo
 /// @param buffer
 /// @param width
@@ -94,21 +119,27 @@ __global__ void remove_red_channel_inp(std::byte* buffer, int width, int height,
     }
 }
 
-__device__ int matching_reservoir(rgb p, reservoir* res)
+__device__ int matching_reservoir(rgb p, reservoir* res, int width, int height)
 {
     int empty = -1;
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int size = width * height;
+    int idx = y * width + x;
+
     for (int j = 0; j < K; j++)
     {
-        if (res[j].w == 0)
+        reservoir r = res[j*size+idx];
+        if (r.w == 0)
         {
             if (empty == -1) {
                 empty = j;
             }
             continue;
         }
-        int dr = abs((int)p.r - (int)res[j].rgbV.r);
-        int dg = abs((int)p.g - (int)res[j].rgbV.g);
-        int db = abs((int)p.b - (int)res[j].rgbV.b);
+        int dr = abs((int)p.r - (int)r.rgbV.r);
+        int dg = abs((int)p.g - (int)r.rgbV.g);
+        int db = abs((int)p.b - (int)r.rgbV.b);
         if (dr + dg + db < THRESHOLD)
         {
             return j;
@@ -190,8 +221,7 @@ __global__ void dilatation_kernel(const uint8_t * input,uint8_t* output, int wid
 }
 
 
-__global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
-                                  curandState* states,
+__global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs, curandState* states,
                                   int width, int height, int stride,
                                   int pixel_stride)
 {
@@ -206,53 +236,52 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
     uint8_t* line_ptr = buffer + y * stride + x * pixel_stride;
     rgb p = { line_ptr[0], line_ptr[1], line_ptr[2] };
 
-    reservoir* res = reservoirs + idx * K;
-
-    int m_idx = matching_reservoir(p, res);
+    int m_idx = matching_reservoir(p, reservoirs, width, height);
 
     float rand_val = curand_uniform(&states[idx]);
-    
-    if (m_idx != -1 && res[m_idx].w > 0)
+
+    int global_idx = m_idx*height*width+idx;
+    if (m_idx != -1 && reservoirs[global_idx].w > 0)
     {
-        unsigned int w = res[m_idx].w;
+        unsigned int w = reservoirs[global_idx].w;
         if (w < MAX_WEIGHTS)
         {
-            res[m_idx].w++;
-            w = res[m_idx].w;
-            res[m_idx].rgbV.r = (uint8_t)(((unsigned int)res[m_idx].rgbV.r * (w - 1) + p.r) / w);
-            res[m_idx].rgbV.g = (uint8_t)(((unsigned int)res[m_idx].rgbV.g * (w - 1) + p.g) / w);
-            res[m_idx].rgbV.b = (uint8_t)(((unsigned int)res[m_idx].rgbV.b * (w - 1) + p.b) / w);
+            reservoirs[global_idx].w++;
+            w = reservoirs[global_idx].w;
+            reservoirs[global_idx].rgbV.r = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.r * (w - 1) + p.r) / w);
+            reservoirs[global_idx].rgbV.g = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.g * (w - 1) + p.g) / w);
+            reservoirs[global_idx].rgbV.b = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.b * (w - 1) + p.b) / w);
         }
         else
         {
-            res[m_idx].rgbV.r = (uint8_t)(((unsigned int)res[m_idx].rgbV.r * (MAX_WEIGHTS - 1) + p.r) / MAX_WEIGHTS);
-            res[m_idx].rgbV.g = (uint8_t)(((unsigned int)res[m_idx].rgbV.g * (MAX_WEIGHTS - 1) + p.g) / MAX_WEIGHTS);
-            res[m_idx].rgbV.b = (uint8_t)(((unsigned int)res[m_idx].rgbV.b * (MAX_WEIGHTS - 1) + p.b) / MAX_WEIGHTS);
+            reservoirs[global_idx].rgbV.r = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.r * (MAX_WEIGHTS - 1) + p.r) / MAX_WEIGHTS);
+            reservoirs[global_idx].rgbV.g = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.g * (MAX_WEIGHTS - 1) + p.g) / MAX_WEIGHTS);
+            reservoirs[global_idx].rgbV.b = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.b * (MAX_WEIGHTS - 1) + p.b) / MAX_WEIGHTS);
         }
 
         line_ptr[0] = 0;
         line_ptr[1] = 0;
         line_ptr[2] = 0;
     }
-    else if (m_idx != -1 && res[m_idx].w == 0)
+    else if (m_idx != -1 && reservoirs[global_idx].w == 0)
     {
-        res[m_idx].rgbV = p;
-        res[m_idx].w = 1;
+        reservoirs[global_idx].rgbV = p;
+        reservoirs[global_idx].w = 1;
     }
     else // Cas 3 : aucune correspondance, aucun slot vide
     {
         int min_idx = 0;
         for (int i = 1; i < K; i++)
-            if (res[i].w < res[min_idx].w)
+            if (reservoirs[height*width*i+idx].w < reservoirs[height*width*min_idx+idx].w)
                 min_idx = i;
         unsigned int total_w = 0;
         for (int i = 0; i < K; i++)
-            total_w += res[i].w;
+            total_w += reservoirs[height*width*i+idx].w;
 
-        if (rand_val * total_w >= res[min_idx].w)
+        if (rand_val * total_w >= reservoirs[height*width*min_idx+idx].w)
         {
-            res[min_idx].rgbV = p;
-            res[min_idx].w = 1;
+            reservoirs[height*width*min_idx+idx].rgbV = p;
+            reservoirs[height*width*min_idx+idx].w = 1;
         }
     }
 
@@ -262,14 +291,14 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
 
     for (int i = 0; i < K; i++)
     {
-        if (res[i].w >= BG_MIN_WEIGHT)
+        if (reservoirs[height*width*i+idx].w >= BG_MIN_WEIGHT)
         {
             found_established = true;
             int d = max(
-                abs((int)p.r - (int)res[i].rgbV.r),
+                abs((int)p.r - (int)reservoirs[height*width*i+idx].rgbV.r),
                 max(
-                    abs((int)p.g - (int)res[i].rgbV.g),
-                    abs((int)p.b - (int)res[i].rgbV.b)
+                    abs((int)p.g - (int)reservoirs[height*width*i+idx].rgbV.g),
+                    abs((int)p.b - (int)reservoirs[height*width*i+idx].rgbV.b)
                 )
             );
             score = min(score, d);
@@ -280,10 +309,10 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
     {
         int max_idx = 0;
         for (int i = 1; i < K; i++)
-            if (res[i].w > res[max_idx].w)
+            if (reservoirs[height*width*i+idx].w > reservoirs[height*width*max_idx+idx].w)
                 max_idx = i;
 
-        rgb bg = res[max_idx].rgbV;
+        rgb bg = reservoirs[height*width*max_idx+idx].rgbV;
         score = max(
             abs((int)p.r - (int)bg.r),
             max(
@@ -334,7 +363,7 @@ __global__ void hysteresis_init(uint8_t* buffer, bool* marker, bool* candidate, 
 /// @param pixel_stride
 /// @param changed
 /// @return
-__global__ void hysteresis_propagation(uint8_t* buffer, const bool* marker, const bool* candidate, int width, int height, size_t stride, int pixel_stride, int* changed_count)
+__global__ void hysteresis_propagation(uint8_t* buffer, const bool* marker, const bool* candidate, int width, int height, size_t stride, int pixel_stride, int* changed_count) {
     unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height)
@@ -410,18 +439,10 @@ namespace
 void difference(uint8_t* buffer, int width, int height, int stride,
                 int pixel_stride)
 {
-    uint8_t* dev_buffer;
-    cudaMalloc(&dev_buffer, height * stride);
-    cudaMemcpy(dev_buffer, buffer, height * stride, cudaMemcpyHostToDevice);
+    dim3 blockSize(32, 32);
+    dim3 gridSize((width + 31)/32, (height + 31)/32);
 
-    dim3 blockSize(16, 16);
-    dim3 gridSize((width + 15)/16, (height + 15)/16);
-
-    difference_kernel<<<gridSize, blockSize>>>(dev_buffer, rs, rng_states,
-                                               width, height, stride, pixel_stride);
-
-    cudaMemcpy(buffer, dev_buffer, height * stride, cudaMemcpyDeviceToHost);
-    cudaFree(dev_buffer);
+    difference_kernel <<<gridSize, blockSize>>> (buffer, rs, rng_states, width, height, stride, pixel_stride);
 }
 
 void cleanup()
@@ -430,8 +451,30 @@ void cleanup()
     {
         cudaFree(rs);
         rs = nullptr;
-        cudaFree(rng_states);
-        rng_states = nullptr;
+    }
+    if (dBuffer != nullptr) {
+        cudaFree(dBuffer);
+        dBuffer = nullptr;
+    }
+    if (marker != nullptr) {
+        cudaFree(marker);
+        marker = nullptr;
+    }
+    if (candidate != nullptr) {
+        cudaFree(candidate);
+        candidate = nullptr;
+    }
+    if (d_changed != nullptr) {
+        cudaFree(d_changed);
+        d_changed = nullptr;
+    }
+    if (eroded != nullptr) {
+        cudaFree(eroded);
+        eroded = nullptr;
+    }
+    if (dOriginal != nullptr) {
+        cudaFree(dOriginal);
+        dOriginal = nullptr;
     }
 }
 
@@ -441,17 +484,31 @@ extern "C"
     void filter_impl(uint8_t* src_buffer, int width, int height, int src_stride, int pixel_stride)
     {
         static bool registered = false;
+        assert(sizeof(rgb) == pixel_stride);
+        static size_t pitch;
+        static size_t original_pitch;
+
+        cudaError_t err;
         if (!registered)
         {
             atexit(cleanup);
             registered = true;
+            err = cudaMallocPitch(&dBuffer, &pitch, width * sizeof(rgb), height);
+            CHECK_CUDA_ERROR(err);
+            CHECK_CUDA_ERROR(cudaMalloc(&marker, width * height * sizeof(bool)));
+            CHECK_CUDA_ERROR(cudaMalloc(&candidate, width * height * sizeof(bool)));
+            CHECK_CUDA_ERROR(cudaMalloc(&d_changed, sizeof(int)));
+            err = cudaMalloc(&eroded,width * sizeof(uint8_t) * height);
+            CHECK_CUDA_ERROR(err);
+            err = cudaMallocPitch(&dOriginal, &original_pitch, width * sizeof(rgb), height);
+            CHECK_CUDA_ERROR(err);
+
+            CHECK_CUDA_ERROR(cudaDeviceSynchronize());
         }
-
-        load_logo();
-
-        dim3 blockSize(16,16);
+        dim3 blockSize(32,32);
         dim3 gridSize((width + (blockSize.x - 1)) / blockSize.x, (height + (blockSize.y - 1)) / blockSize.y);
 
+        // load_logo();
         if (rs == nullptr || res_width == 0 || res_height == 0)
         {
             if (rs != nullptr)
@@ -467,33 +524,20 @@ extern "C"
                 cudaMalloc(&rs, width * height * K * sizeof(reservoir)));
             CHECK_CUDA_ERROR(
                 cudaMemset(rs, 0, width * height * K * sizeof(reservoir)));
-
             CHECK_CUDA_ERROR(cudaMalloc(&rng_states, width * height * sizeof(curandState)));
             init_rng<<<gridSize, blockSize>>>(rng_states, width, height);
             CHECK_CUDA_ERROR(cudaDeviceSynchronize());
-
         }
+        err = cudaMemcpy2D(dOriginal, original_pitch, src_buffer, src_stride, width * sizeof(rgb), height, cudaMemcpyDefault);
+        CHECK_CUDA_ERROR(err);
+        err = cudaMemcpy2D(dBuffer, pitch, dOriginal, original_pitch, width * sizeof(rgb), height, cudaMemcpyDeviceToDevice);
+        CHECK_CUDA_ERROR(err);
 
         assert(sizeof(rgb) == pixel_stride);
-        difference(src_buffer, width, height, src_stride, pixel_stride);
+        difference(dBuffer, width, height, pitch, pixel_stride);
         CHECK_CUDA_ERROR(cudaDeviceSynchronize());
 
-
-        uint8_t* dBuffer;
-        size_t pitch;
-
-        cudaError_t err;
-        
-        err = cudaMallocPitch(&dBuffer, &pitch, width * sizeof(rgb), height);
-        CHECK_CUDA_ERROR(err);
-
-        err = cudaMemcpy2D(dBuffer, pitch, src_buffer, src_stride, width * sizeof(rgb), height, cudaMemcpyDefault);
-        CHECK_CUDA_ERROR(err);
-
 	    // STEP2: Ouverture
-	    uint8_t* eroded;
-	    err = cudaMalloc(&eroded,width * sizeof(uint8_t) * height);
-	    CHECK_CUDA_ERROR(err);
 	    erosion_kernel<<<gridSize,blockSize>>>(dBuffer,eroded,width,height,pitch,pixel_stride,RADIUS);
 
 	    cudaCheckError();
@@ -501,47 +545,35 @@ extern "C"
 	    dilatation_kernel<<<gridSize,blockSize>>>(eroded,dBuffer,width,height,pitch,pixel_stride,RADIUS);
 
 	    cudaCheckError();
-	    cudaFree(eroded);
 
         // STEP 3 : Hysteresis
-        bool* marker;
-        err = cudaMalloc(&marker, width * sizeof(bool) * height);
-        CHECK_CUDA_ERROR(err);
-
-        bool* candidate;
-        err = cudaMalloc(&candidate, width * sizeof(bool) * height);
-        CHECK_CUDA_ERROR(err);
-
         hysteresis_init<<<gridSize, blockSize>>>(dBuffer, marker, candidate, width, height, pitch, pixel_stride);
         cudaDeviceSynchronize();
         cudaCheckError();
 
-        int* d_count;
-        err = cudaMalloc(&d_count, sizeof(int));
-        CHECK_CUDA_ERROR(err);
-
         int h_count = 1;
         while (h_count > 0)
         {
-            CHECK_CUDA_ERROR(cudaMemset(d_count, 0, sizeof(int)));
+            CHECK_CUDA_ERROR(cudaMemset(d_changed, 0, sizeof(int)));
 
             hysteresis_propagation<<<gridSize, blockSize>>>(dBuffer, marker, candidate,
-                width, height, pitch, pixel_stride, d_count);
+                width, height, pitch, pixel_stride, d_changed);
             cudaCheckError();
 
             CHECK_CUDA_ERROR(cudaDeviceSynchronize());
-            CHECK_CUDA_ERROR(cudaMemcpy(&h_count, d_count, sizeof(int), cudaMemcpyDeviceToHost));
+            CHECK_CUDA_ERROR(cudaMemcpy(&h_count, d_changed, sizeof(int), cudaMemcpyDeviceToHost));
+        }
+        CHECK_CUDA_ERROR(err);
         }
         //remove_red_channel_inp<<<gridSize, blockSize>>>(dBuffer, width, height, pitch);
+        
+        // STEP 4 : Masquage
+        masquage<<<gridSize,blockSize>>>(dOriginal,dBuffer,width,height,original_pitch, pitch,pixel_stride);
+        cudaDeviceSynchronize();
+        cudaCheckError();
 
-
-        err = cudaMemcpy2D(src_buffer, src_stride, dBuffer, pitch, width * sizeof(rgb), height, cudaMemcpyDefault);
+        err = cudaMemcpy2D(src_buffer, src_stride, dOriginal, original_pitch, width * sizeof(rgb), height, cudaMemcpyDefault);
         CHECK_CUDA_ERROR(err);
-
-        cudaFree(dBuffer);
-        cudaFree(marker);
-        cudaFree(candidate);
-        cudaFree(d_count);
         
         err = cudaDeviceSynchronize();
         CHECK_CUDA_ERROR(err);
