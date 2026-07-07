@@ -210,6 +210,26 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
     line_ptr[2] = value;
 }
 
+__global__ void masquage(uint8_t* input,uint8_t*mask, int width, int height,int input_stride,int mask_stride, int pixel_stride)
+{
+    rgb red = {255,0,0};
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height)
+        return;
+
+    uint8_t* lineptr = input + y * original_stride + x * pixel_stride;
+    uint8_t* maskptr = mask + y * mask_stride + x * pixel_stride;
+            
+    // partie rouge mis entre 0 et 1 (facteur)
+    float m = maskptr[0] / 255.0f;
+           
+    lineptr[0] = (uint8_t)min(255.0f,(lineptr[0] + 0.5f * red.r * m));
+
+}
+
+
 /// @brief Initialization for hysteresis filter on the image contained in "buffer"
 /// @param buffer
 /// @param marker should be of size width * height
@@ -334,6 +354,11 @@ void difference(uint8_t* buffer, int width, int height, int stride,
     cudaFree(dev_buffer);
 }
 
+
+
+
+
+
 void cleanup()
 {
     if (rs != nullptr)
@@ -379,10 +404,17 @@ extern "C"
 
         assert(sizeof(rgb) == pixel_stride);
         uint8_t* dBuffer;
+        uint8_t* dOriginal; // copie image originel
         size_t pitch;
-
+        size_t original_pitch;
         cudaError_t err;
-        
+
+        err = cudaMallocPitch(&dOriginal, &original_pitch, width * sizeof(rgb), height);
+        CHECK_CUDA_ERROR(err);
+
+        err = cudaMemcpy2D(dOriginal, original_pitch, src_buffer, src_stride, width * sizeof(rgb), height, cudaMemcpyDefault);
+        CHECK_CUDA_ERROR(err);
+
         err = cudaMallocPitch(&dBuffer, &pitch, width * sizeof(rgb), height);
         CHECK_CUDA_ERROR(err);
 
@@ -405,6 +437,10 @@ extern "C"
         cudaDeviceSynchronize();
         cudaCheckError();
 
+
+
+
+
         bool* d_changed;
         err = cudaMalloc(&d_changed, sizeof(bool));
         CHECK_CUDA_ERROR(err);
@@ -423,11 +459,16 @@ extern "C"
         }
         //remove_red_channel_inp<<<gridSize, blockSize>>>(dBuffer, width, height, pitch);
         
+        // STEP 4: Masquage
+        masquage<<<gridSize,blockSize>>>(dOriginal,dBuffer,width,height,original_pitch, pitch,pixel_stride);
+        cudaDeviceSynchronize();
+        cudaCheckError();
 
-        err = cudaMemcpy2D(src_buffer, src_stride, dBuffer, pitch, width * sizeof(rgb), height, cudaMemcpyDefault);
+        err = cudaMemcpy2D(src_buffer, src_stride, dOriginal, original_pitch, width * sizeof(rgb), height, cudaMemcpyDefault);
         CHECK_CUDA_ERROR(err);
 
         cudaFree(dBuffer);
+        cudaFree(dOriginal);
         cudaFree(marker);
         cudaFree(candidate);
         
