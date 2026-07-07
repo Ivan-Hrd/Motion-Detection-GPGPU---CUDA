@@ -318,22 +318,70 @@ void difference(uint8_t* buffer, int width, int height, int stride, int pixel_st
     }
 }
 
+
+uint8_t* copie_input(uint8_t* input,int width, int height,int stride,int pixel_stride)
+{
+    uint8_t * copie = new uint8_t[stride * height];
+    for (int y = 0; y < height; ++y)
+    {
+        for (int x = 0; x < width; ++x)
+        {
+            uint8_t* lineptr = input + y * stride + x * pixel_stride;
+            uint8_t* copieptr = copie + y * stride + x * pixel_stride;
+            copieptr[0]  = lineptr[0];
+            copieptr[1]  = lineptr[1];
+            copieptr[2]  = lineptr[2];
+            if (pixel_stride == 4)
+            {
+                copieptr[3] = lineptr[3];
+            }
+        }
+    }
+    return copie;
+}
+void masquage(uint8_t* input,uint8_t*mask, int width, int height,int stride, int pixel_stride)
+{
+    rgb red = {255,0,0};
+    for (int y = 0; y < height; ++y)
+    {
+        for (int x = 0; x < width; ++x)
+        {
+            uint8_t* lineptr = input + y * stride + x * pixel_stride;
+            uint8_t* maskptr = mask + y * stride + x * pixel_stride;
+            
+            // partie rouge mis entre 0 et 1 (facteur)
+            float m = maskptr[0] / 255.0f;
+            
+            // input = input + 0.5 * red * masque
+            lineptr[0] = static_cast<uint8_t>(std::min(255.0f,lineptr[0] + 0.5f * red.r * m));
+        }
+    }
+}
+
+
 extern "C" {
 
     void filter_impl(uint8_t* buffer, int width, int height, int stride, int pixel_stride)
     {
+        // STEP 0: copie input
+        uint8_t* mask = copie_input(buffer,width, height,stride,pixel_stride);
+
         // STEP 1 : difference
-        difference(buffer, width, height, stride, pixel_stride);
+        difference(mask, width, height, stride, pixel_stride);
+
 
         // STEP 2 : Ouverture
         static std::vector<uint8_t> eroded;
 
-        erosion(buffer, eroded, width, height, stride, pixel_stride, RADIUS);
-        dilatation(eroded, buffer, width, height, stride, pixel_stride, RADIUS);
+        erosion(mask, eroded, width, height, stride, pixel_stride, RADIUS);
+        dilatation(eroded, mask, width, height, stride, pixel_stride, RADIUS);
 
         // STEP 3: Seuillage d’hystérésis
-        hysteresis(buffer, width, height, stride, pixel_stride, LOW, HIGH);
+        hysteresis(mask, width, height, stride, pixel_stride, LOW, HIGH);
 
+        // STEP 4: masquage
+        masquage(buffer,mask,width,height,stride,pixel_stride);
+        delete[] mask;
         // You can fake a long-time process with sleep
         {
             using namespace std::chrono_literals;
