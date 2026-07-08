@@ -192,8 +192,7 @@ __global__ void erosion_kernel(uint8_t* buffer,uint8_t * eroded,  int width, int
 }
 
 
-__global__ void dilatation_kernel(const uint8_t * input,uint8_t* output, int width, int height, int stride, int pixel_stride,int radius)
-{
+__global__ void dilatation_kernel(const uint8_t * input,uint8_t* output, int width, int height, int stride, int pixel_stride,int radius) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height)
@@ -201,53 +200,33 @@ __global__ void dilatation_kernel(const uint8_t * input,uint8_t* output, int wid
     uint8_t max_value = 0;
     for (int dy = -radius; dy <= radius; dy++)
     {
-	    int yy = y + dy;
-	    if (yy < 0 || yy >= height)
-	    {
-	    	continue;
-	    }
-	    for (int dx = -radius; dx <= radius;dx++)
-	    {
-		    int xx = x + dx;
-		    if (xx < 0 || xx >= width)
-		    {
-			    continue;
-		    }
+        int yy = y + dy;
+        if (yy < 0 || yy >= height)
+        {
+            continue;
+        }
+        for (int dx = -radius; dx <= radius;dx++)
+        {
+            int xx = x + dx;
+            if (xx < 0 || xx >= width)
+            {
+                continue;
+            }
 
-		    uint8_t value = input[yy * width + xx];
-		    max_value = max(max_value,value);
-	    }
+            uint8_t value = input[yy * width + xx];
+            max_value = max(max_value,value);
+        }
     }
     int idx =  y * stride + x * pixel_stride;
     output[idx] = max_value;
     output[idx + 1] = max_value;
     output[idx + 2] = max_value;
-
 }
 
 
-/// @brief Initialise un état cuRAND par pixel (à lancer une seule fois)
-/// @param states tableau de width * height états
-/// @param width
-/// @param height
-/// @param seed graine globale
-__global__ void init_rand_states(curandState* states, int width, int height,
-                                 unsigned long long seed)
-{
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (x >= width || y >= height)
-        return;
-
-    int idx = y * width + x;
-    curand_init(idx, 0, 0, &states[idx]);
-}
-
-
-__global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs, curandState* states,
+__global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
                                   int width, int height, int stride,
-                                  int pixel_stride, size_t pitch_rs)
+                                  int pixel_stride, size_t pitch_rs, unsigned long long counter)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -262,8 +241,9 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs, curand
 
     int m_idx = matching_reservoir(p, reservoirs, width, height, static_cast<int>(pitch_rs));
 
-
-    float rand_val = curand_uniform(&states[idx]);
+    curandStatePhilox4_32_10_t state;
+    curand_init(1234ull, idx, counter, &state);
+    float rand_val = curand_uniform(&state);
 
   
     int global_idx = m_idx*pitch_rs+idx*sizeof(reservoir);
@@ -478,10 +458,11 @@ namespace
 void difference(uint8_t* buffer, int width, int height, int stride,
                 int pixel_stride, size_t pitch_rs)
 {
+    static unsigned long long counter = 0;
     dim3 blockSize(32, 32);
     dim3 gridSize((width + 31)/32, (height + 31)/32);
 
-    difference_kernel <<<gridSize, blockSize>>> (buffer, rs, d_rand_states, width, height, stride, pixel_stride, pitch_rs);
+    difference_kernel <<<gridSize, blockSize>>> (buffer, rs, width, height, stride, pixel_stride, pitch_rs, counter++);
 }
 
 void cleanup() {
@@ -548,14 +529,13 @@ extern "C" {
             err = cudaMallocPitch(&dOriginal, &original_pitch, width * sizeof(rgb), height);
             CHECK_CUDA_ERROR(err);
             CHECK_CUDA_ERROR(cudaMalloc(&d_count, sizeof(int)));
-
+            /*
             // Init cuRAND : un état par pixel, initialisé une seule fois
             CHECK_CUDA_ERROR(cudaMalloc(&d_rand_states, width * height * sizeof(curandState)));
             dim3 initBlock(32, 32);
             dim3 initGrid((width + 31) / 32, (height + 31) / 32);
-            init_rand_states<<<initGrid, initBlock>>>(d_rand_states, width, height, 1234ULL);
             cudaCheckError();
-
+            */
             CHECK_CUDA_ERROR(cudaDeviceSynchronize());
         }
         dim3 blockSize(32,32);
