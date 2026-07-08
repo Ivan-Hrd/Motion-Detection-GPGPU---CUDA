@@ -240,11 +240,6 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
     rgb p = { line_ptr[0], line_ptr[1], line_ptr[2] };
 
     int m_idx = matching_reservoir(p, reservoirs, width, height, static_cast<int>(pitch_rs));
-
-    curandStatePhilox4_32_10_t state;
-    curand_init(1234ull, idx, counter, &state);
-    float rand_val = curand_uniform(&state);
-
   
     int global_idx = m_idx*pitch_rs+idx*sizeof(reservoir);
     reservoir r = *(reservoir*)((uint8_t*)reservoirs+global_idx);
@@ -279,6 +274,10 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
     else // Cas 3 : aucune correspondance, aucun slot vide
     {
         int min_idx = 0;
+        curandStatePhilox4_32_10_t state;
+        curand_init(1234ull, idx, counter, &state);
+        float rand_val = curand_uniform(&state);
+
 
         for (int i = 1; i < K; i++) {
             reservoir* r1 = (reservoir*)((uint8_t*)reservoirs+pitch_rs*i+idx*sizeof(reservoir));
