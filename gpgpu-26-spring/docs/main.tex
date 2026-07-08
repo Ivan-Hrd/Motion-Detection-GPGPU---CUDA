@@ -18,7 +18,7 @@
 \pgfplotsset{compat=1.17}
 
 % ---- Couleurs ----
-\definecolor{maincolor}{RGB}{0,90,160}
+\definecolor{maincolor}{RGB}{0,0,0}
 
 % ---- Couleur des titres de section (police inchangée) ----
 \titleformat{\section}
@@ -81,8 +81,115 @@ L'ouverture est une érosion suivie d'une dilatation appliquée sur le masque de
 
 \subsection{Masquage final}
 
-\subsection{Ce qui a été implémenté sur GPU}
+\section{Portage GPU}
 On a fait le choix d'implémenter toute la pipeline (les 4 étapes) sur GPU pour minimiser le transfert de mémoire CPU $\leftrightarrow$ GPU.
+
+\subsection{Fonction de différence}
+La fonction difference constitue le cœur de l'algorithme de détection de fond. Pour chaque pixel, elle maintient un ensemble de K réservoirs contenant des couleurs de référence du fond, chacun associé à un poids représentant sa fréquence d'apparition.
+
+\begin{verbatim}
+struct reservoir {
+    rgb rgbV;       // couleur moyenne
+    unsigned int w; // poids
+};
+\end{verbatim}
+Sur CPU, ces réservoirs étaient stockés dans un \verb|std::vector<std::array<reservoir, K>>|, indexé par pixel. Sur GPU, on alloue un tableau plat en mémoire globale :
+\verb|cudaMalloc(&rs, width * height * K * sizeof(reservoir));|
+Le pixel \verb|idx = y * width + x| accède à ses K réservoirs via \verb|reservoirs + idx * K|.
+
+Chaque thread GPU traite un pixel indépendamment. Pour chaque pixel, trois cas sont possibles :
+\\
+\textbf{Cas 1} — correspondance trouvée (matching\_reservoir retourne un indice avec w > 0) : on met à jour la moyenne pondérée de la couleur du réservoir. Tant que le poids n'a pas atteint MAX\_WEIGHTS, on utilise une moyenne cumulative ; au-delà, une moyenne glissante pour s'adapter aux changements lents du fond. \\
+\textbf{Cas 2} — slot vide (w == 0) : on initialise le réservoir avec la couleur actuelle et un poids de 1. \\
+\textbf{Cas 3} — aucune correspondance et aucun slot vide : on remplace le réservoir de poids minimal avec une probabilité proportionnelle à son poids relatif, implémentée via un nombre aléatoire généré par cuRAND.
+\\
+Sur CPU, chaque pixel disposait d'un générateur \verb|std::mt19937| dédié. Sur GPU, \verb|std::mt19937| n'est pas disponible. On utilise à la place la bibliothèque cuRAND, dont les états sont alloués de manière persistante entre les frames.
+\\ 
+Après mise à jour des réservoirs, chaque thread calcule un score de différence entre le pixel courant et le fond estimé. On cherche parmi les réservoirs dont le poids dépasse BG\_MIN\_WEIGHT = 30 (réservoirs "établis") celui qui est le plus proche du pixel courant. Si aucun réservoir n'est encore établi, on utilise le réservoir de poids maximal par défaut. Le score final, compris entre 0 et 255, est écrit en niveaux de gris dans le buffer de sortie.
+
+\subsection{Fonction Hysteresis}
+La version CPU de la propagation d'hystérésis utilisait un booléen \verb|changed| pour détecter si au moins un pixel avait été activé lors d'une itération. Le portage naïf consistait à passer un pointeur \verb|bool* changed| au kernel, puis à écrire \verb|*changed = true| depuis chaque thread ayant activé un pixel.
+\\
+Ce schéma introduit un \textit{data race} : plusieurs milliers de threads peuvent écrire simultanément à la même adresse mémoire sans synchronisation. En CUDA, ce comportement est indéfini : certaines écritures peuvent être silencieusement perdues, rendant le critère d'arrêt de la boucle \verb|while| non fiable.
+\\
+Indépendamment du \textit{data race}, la boucle \verb|while| nécessitait à chaque itération deux transferts sur le bus PCIe :
+\\
+\textbf{CPU $\rightarrow$ GPU} : remise à zéro du booléen. \\
+\textbf{GPU $\rightarrow$ CPU} : lecture du résultat.
+\\
+Ces transferts sont particulièrement coûteux, le bus PCIe constituant le principal goulot d'étranglement entre CPU et GPU.
+\\
+La solution consiste à remplacer le booléen \verb|changed| par un compteur entier \verb|int* changed_count|. Chaque thread qui active un pixel incrémente ce compteur de manière atomique :
+
+\begin{verbatim}
+atomicAdd(changed_count, 1);
+\end{verbatim}
+
+La primitive \verb|atomicAdd| garantit que tous les incréments concurrents sont correctement pris en compte, éliminant ainsi le \textit{data race}.
+\\
+Côté CPU, le compteur est réinitialisé directement sur le GPU à l'aide de \verb|cudaMemset|, ce qui supprime un des deux transferts PCIe par itération :
+
+\begin{verbatim}
+int h_count = 1;
+
+while (h_count > 0)
+{
+    cudaMemset(d_count, 0, sizeof(int));
+    hysteresis_propagation<<<...>>>(..., d_count);
+    cudaDeviceSynchronize();
+    cudaMemcpy(&h_count, d_count,
+               sizeof(int), cudaMemcpyDeviceToHost);
+}
+\end{verbatim}
+
+On passe ainsi de deux transferts PCIe par itération à un seul, tout en garantissant la correction de l'algorithme en présence d'exécutions concurrentes.
+
+
+\bigskip
+\section{Optimisation GPU}
+\subsection{Fusion des opérations morphologiques}
+
+L'implémentation initiale de l'ouverture morphologique reposait sur deux kernels CUDA distincts : un premier kernel réalisait l'érosion de l'image, puis un second effectuait la dilatation du résultat obtenu. Cette approche nécessitait l'utilisation d'un tampon intermédiaire \verb|eroded| stocké en mémoire globale du GPU.
+\\
+Le déroulement des opérations était le suivant :
+
+\begin{verbatim}
+dBuffer
+   |
+erosion_kernel
+   |
+eroded (mémoire globale)
+   |
+dilatation_kernel
+   |
+dBuffer
+\end{verbatim}
+
+Cette implémentation présentait plusieurs inconvénients. Après le calcul de l'érosion, l'intégralité de l'image intermédiaire était écrite en mémoire globale, puis immédiatement relue par le kernel de dilatation. Or, bien que la mémoire globale offre une grande capacité de stockage, elle possède une latence nettement supérieure à celle de la mémoire partagée (\textit{shared memory}). Les accès répétés à cette mémoire constituent donc un goulot d'étranglement pour ce type d'algorithme fortement local, où chaque pixel ne dépend que de ses voisins immédiats.
+\\
+De plus, le lancement de deux kernels successifs introduisait un surcoût supplémentaire lié aux synchronisations implicites entre les deux étapes ainsi qu'à la gestion d'un buffer intermédiaire dédié.
+\\
+Afin de limiter ces coûts, les deux opérations ont été fusionnées dans un unique kernel \verb|opening_kernel_shared| utilisant la mémoire partagée. Chaque bloc CUDA charge désormais un sous-ensemble de l'image, ainsi qu'un halo de pixels voisins, dans un tableau partagé. Les threads réalisent ensuite l'érosion directement sur cette copie locale avant d'effectuer immédiatement la dilatation, sans repasser par la mémoire globale.
+
+\begin{verbatim}
+Mémoire globale
+       |
+Chargement dans la shared memory
+       |
+Erosion
+       |
+Dilatation
+       |
+Ecriture du résultat final
+\end{verbatim}
+
+L'utilisation de la mémoire partagée permet de réutiliser plusieurs fois les mêmes pixels au cours des deux opérations morphologiques. Chaque pixel du voisinage n'est chargé qu'une seule fois depuis la mémoire globale, puis est réutilisé par l'ensemble des threads du bloc. Cette stratégie réduit significativement le nombre d'accès à la mémoire globale, dont la latence est beaucoup plus élevée que celle de la mémoire partagée.
+\\
+Cette fusion permet également de supprimer complètement le buffer intermédiaire \verb|eroded|, évitant ainsi une écriture complète de l'image suivie d'une relecture intégrale. Le nombre de lancements de kernels est également réduit de deux à un, diminuant le coût associé aux synchronisations entre kernels.
+\\
+Les mesures obtenues avec \textit{Nsight Compute} mettent en évidence ce gain de performances. Dans la version initiale, les kernels \verb|erosion_kernel| et \verb|dilatation_kernel| représentaient respectivement environ 7,8\,\% et 6,8\,\% du temps d'exécution GPU. Après fusion, le nouveau kernel \verb|opening_kernel_shared| ne représente plus qu'environ 9,8\,\% du temps total d'exécution.
+\\
+Ainsi, la fusion des deux opérations morphologiques permet de réduire les accès à la mémoire globale, de supprimer un buffer intermédiaire, de diminuer le nombre de lancements de kernels et d'exploiter efficacement la mémoire partagée. Malgré le fait que le nouveau kernel réalise exactement les deux traitements, son coût reste inférieur à la somme des deux kernels initiaux, ce qui traduit une meilleure utilisation de la hiérarchie mémoire du GPU.
 
 \bigskip
 
@@ -92,7 +199,7 @@ On a fait le choix d'implémenter toute la pipeline (les 4 étapes) sur GPU pour
 \subsection{Baseline}
 \begin{itemize}[leftmargin=1.5cm]
     \item Différence + ouverture \hfill --- \textbf{Ivan}
-    \item Seuillage d'hystérésis \hfill --- \textbf{Steeve}
+    \item Seuillage d'hystérésis \hfill --- \textbf{Steeve + Clément}
     \item Masquage \hfill --- \textbf{Marcel}
 \end{itemize}
 
@@ -108,6 +215,7 @@ On a fait le choix d'implémenter toute la pipeline (les 4 étapes) sur GPU pour
 \begin{itemize}[leftmargin=1.5cm]
     \item Optimisation mémoire + AoS to SoA \hfill --- \textbf{Ivan}
     \item Optimisation alignement mémoire (\texttt{mallocPitch} + \texttt{alignas}) \hfill --- \textbf{Steeve}
+    \item Fusion des kernels d'érosion et de dilatation
     \item \textit{... à compléter}
 \end{itemize}
 
