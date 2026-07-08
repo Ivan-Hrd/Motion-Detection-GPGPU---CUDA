@@ -529,13 +529,6 @@ extern "C" {
             err = cudaMallocPitch(&dOriginal, &original_pitch, width * sizeof(rgb), height);
             CHECK_CUDA_ERROR(err);
             CHECK_CUDA_ERROR(cudaMalloc(&d_count, sizeof(int)));
-            /*
-            // Init cuRAND : un état par pixel, initialisé une seule fois
-            CHECK_CUDA_ERROR(cudaMalloc(&d_rand_states, width * height * sizeof(curandState)));
-            dim3 initBlock(32, 32);
-            dim3 initGrid((width + 31) / 32, (height + 31) / 32);
-            cudaCheckError();
-            */
             CHECK_CUDA_ERROR(cudaDeviceSynchronize());
         }
         dim3 blockSize(32,32);
