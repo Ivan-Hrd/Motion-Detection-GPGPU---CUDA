@@ -237,36 +237,37 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs, curand
     rgb p = { line_ptr[0], line_ptr[1], line_ptr[2] };
 
     int m_idx = matching_reservoir(p, reservoirs, width, height);
-
     float rand_val = curand_uniform(&states[idx]);
+    if (m_idx != -1) {
 
-    int global_idx = m_idx*height*width+idx;
-    if (m_idx != -1 && reservoirs[global_idx].w > 0)
-    {
-        unsigned int w = reservoirs[global_idx].w;
-        if (w < MAX_WEIGHTS)
+        int global_idx = m_idx*height*width+idx;
+        if (m_idx != -1 && reservoirs[global_idx].w > 0)
         {
-            reservoirs[global_idx].w++;
-            w = reservoirs[global_idx].w;
-            reservoirs[global_idx].rgbV.r = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.r * (w - 1) + p.r) / w);
-            reservoirs[global_idx].rgbV.g = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.g * (w - 1) + p.g) / w);
-            reservoirs[global_idx].rgbV.b = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.b * (w - 1) + p.b) / w);
-        }
-        else
-        {
-            reservoirs[global_idx].rgbV.r = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.r * (MAX_WEIGHTS - 1) + p.r) / MAX_WEIGHTS);
-            reservoirs[global_idx].rgbV.g = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.g * (MAX_WEIGHTS - 1) + p.g) / MAX_WEIGHTS);
-            reservoirs[global_idx].rgbV.b = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.b * (MAX_WEIGHTS - 1) + p.b) / MAX_WEIGHTS);
-        }
+            unsigned int w = reservoirs[global_idx].w;
+            if (w < MAX_WEIGHTS)
+            {
+                reservoirs[global_idx].w++;
+                w = reservoirs[global_idx].w;
+                reservoirs[global_idx].rgbV.r = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.r * (w - 1) + p.r) / w);
+                reservoirs[global_idx].rgbV.g = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.g * (w - 1) + p.g) / w);
+                reservoirs[global_idx].rgbV.b = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.b * (w - 1) + p.b) / w);
+            }
+            else
+            {
+                reservoirs[global_idx].rgbV.r = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.r * (MAX_WEIGHTS - 1) + p.r) / MAX_WEIGHTS);
+                reservoirs[global_idx].rgbV.g = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.g * (MAX_WEIGHTS - 1) + p.g) / MAX_WEIGHTS);
+                reservoirs[global_idx].rgbV.b = (uint8_t)(((unsigned int)reservoirs[global_idx].rgbV.b * (MAX_WEIGHTS - 1) + p.b) / MAX_WEIGHTS);
+            }
 
-        line_ptr[0] = 0;
-        line_ptr[1] = 0;
-        line_ptr[2] = 0;
-    }
-    else if (m_idx != -1 && reservoirs[global_idx].w == 0)
-    {
-        reservoirs[global_idx].rgbV = p;
-        reservoirs[global_idx].w = 1;
+            line_ptr[0] = 0;
+            line_ptr[1] = 0;
+            line_ptr[2] = 0;
+        }
+        else if (m_idx != -1 && reservoirs[global_idx].w == 0)
+        {
+            reservoirs[global_idx].rgbV = p;
+            reservoirs[global_idx].w = 1;
+        }
     }
     else // Cas 3 : aucune correspondance, aucun slot vide
     {
