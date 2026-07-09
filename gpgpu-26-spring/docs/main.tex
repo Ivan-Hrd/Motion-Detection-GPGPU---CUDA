@@ -134,6 +134,29 @@ struct reservoir {
     Après mise à jour des réservoirs, chaque thread calcule un score de différence entre le pixel courant et le fond estimé. On cherche parmi les réservoirs dont le poids dépasse BG\_MIN\_WEIGHT = 30 (réservoirs "établis") celui qui est le plus proche du pixel courant. Si aucun réservoir n'est encore établi, on utilise le réservoir de poids maximal par défaut. Le score final, compris entre 0 et 255, est écrit en niveaux de gris dans le buffer de sortie.
 
     \subsection{Ouverture morphologique}
+   Pour l'ouverture morpholique, le passage du CPU au GPU ne modifie pas les algorithme de morphologie mathématique, seule leurs exécutions sont parallélisées. De plus , l'erosion et la dilatation sont deux traitements naturellement parallélisables car la valeur produite pour chaque pixel dépend uniquement de son voisinage et peut donc être calculée indépendamment des autres pixels.
+    \paragraph{Fonction d'Erosion:} 
+    Pour la fonction d'erosion,le kernel attribue un thread à chaque pixel de l'image. Avec les formules suivantes:
+      \begin{verbatim}
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    \end{verbatim}
+
+    Chaque thread parcourt une  champs de valeur de rayon r centrée sur son pixel et recherche la valeur minimale. Les coordonnées du thread permettent d'identifier directement le pixel traité. Avant tout calcul, un test vérifie que le thread ne dépasse pas les dimensions de l'image. Pour chaque voisin valide, le minimum est mis à jour:
+    \(min\_value = min(min\_value,value)\)
+    Le résultat est ensuite enregistré dans un tampon temporaire (eroded). Ici,
+l'utilisation d'un tampon intermédiaire est indispensable car l'érosion doit être calculée entièrement avant que la dilatation ne commence. Écrire directement dans l'image d'origine modifierait les valeurs utilisées par les pixels voisins et produirait un résultat incorrect.
+    
+    \paragraph{Fonction de Dilatation: }
+    La dilatation est implémentée de manière similaire. Chaque thread lit cette fois les données du tampon eroded, parcourt son voisinage et conserve la valeur maximale.
+    \(max\_value=max(max\_value,value)\)
+    Cette duplication est nécessaire car le reste du pipeline manipule une image RGB alors que les opérations morphologiques sont réalisées sur une image en niveaux de gris.
+    \begin{itemize}
+        \item \(output[idx]     = max\_value;\)
+        \item \(output[idx + 1] = max\_value;\)
+        \item \(output[idx + 2] = max\_value;\)
+    \end{itemize}
+    Cette duplication est nécessaire car le reste du pipeline manipule une image RGB alors que les opérations morphologiques sont réalisées sur une image en niveaux de gris.
 
 
     \subsection{Fonction Hysteresis}
