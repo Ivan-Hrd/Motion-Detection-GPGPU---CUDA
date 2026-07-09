@@ -294,36 +294,37 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
     rgb p = { line_ptr[0], line_ptr[1], line_ptr[2] };
 
     int m_idx = matching_reservoir(p, reservoirs, width, height, static_cast<int>(pitch_rs));
-  
-    int global_idx = m_idx*pitch_rs+idx*sizeof(reservoir);
-    reservoir r = *(reservoir*)((uint8_t*)reservoirs+global_idx);
-    if (m_idx != -1 && r.w > 0)
-    {
-        unsigned int w = r.w;
-        if (w < MAX_WEIGHTS)
+    if (m_idx != -1) {
+        int global_idx = m_idx*pitch_rs+idx*sizeof(reservoir);
+        reservoir r = *(reservoir*)((uint8_t*)reservoirs+global_idx);
+        if (m_idx != -1 && r.w > 0)
         {
-            r.w++;
-            w = r.w;
-            r.rgbV.r = (uint8_t)(((unsigned int)r.rgbV.r * (w - 1) + p.r) / w);
-            r.rgbV.g = (uint8_t)(((unsigned int)r.rgbV.g * (w - 1) + p.g) / w);
-            r.rgbV.b = (uint8_t)(((unsigned int)r.rgbV.b * (w - 1) + p.b) / w);
+            unsigned int w = r.w;
+            if (w < MAX_WEIGHTS)
+            {
+                r.w++;
+                w = r.w;
+                r.rgbV.r = (uint8_t)(((unsigned int)r.rgbV.r * (w - 1) + p.r) / w);
+                r.rgbV.g = (uint8_t)(((unsigned int)r.rgbV.g * (w - 1) + p.g) / w);
+                r.rgbV.b = (uint8_t)(((unsigned int)r.rgbV.b * (w - 1) + p.b) / w);
+            }
+            else
+            {
+                r.rgbV.r = (uint8_t)(((unsigned int)r.rgbV.r * (MAX_WEIGHTS - 1) + p.r) / MAX_WEIGHTS);
+                r.rgbV.g = (uint8_t)(((unsigned int)r.rgbV.g * (MAX_WEIGHTS - 1) + p.g) / MAX_WEIGHTS);
+                r.rgbV.b = (uint8_t)(((unsigned int)r.rgbV.b * (MAX_WEIGHTS - 1) + p.b) / MAX_WEIGHTS);
+            }
+            *(reservoir*)((uint8_t*)reservoirs+global_idx) = r;
+            line_ptr[0] = 0;
+            line_ptr[1] = 0;
+            line_ptr[2] = 0;
         }
-        else
+        else if (m_idx != -1 && r.w == 0)
         {
-            r.rgbV.r = (uint8_t)(((unsigned int)r.rgbV.r * (MAX_WEIGHTS - 1) + p.r) / MAX_WEIGHTS);
-            r.rgbV.g = (uint8_t)(((unsigned int)r.rgbV.g * (MAX_WEIGHTS - 1) + p.g) / MAX_WEIGHTS);
-            r.rgbV.b = (uint8_t)(((unsigned int)r.rgbV.b * (MAX_WEIGHTS - 1) + p.b) / MAX_WEIGHTS);
+            r.rgbV = p;
+            r.w = 1;
+            *(reservoir*)((uint8_t*)reservoirs+global_idx) = r;
         }
-        *(reservoir*)((uint8_t*)reservoirs+global_idx) = r;
-        line_ptr[0] = 0;
-        line_ptr[1] = 0;
-        line_ptr[2] = 0;
-    }
-    else if (m_idx != -1 && r.w == 0)
-    {
-        r.rgbV = p;
-        r.w = 1;
-        *(reservoir*)((uint8_t*)reservoirs+global_idx) = r;
     }
     else // Cas 3 : aucune correspondance, aucun slot vide
     {
