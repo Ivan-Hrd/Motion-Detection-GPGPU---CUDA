@@ -85,17 +85,6 @@ __global__ void masquage(uint8_t* input,uint8_t*mask, int width, int height,int 
 
 }
 
-__global__ void init_rng(curandState* states, int width, int height)
-{
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height) return;
-
-    int idx = y * width + x;
-    curand_init(idx, 0, 0, &states[idx]);
-}
-
-
 /// @brief Black out the red channel from the video and add EPITA's logo
 /// @param buffer
 /// @param width
@@ -289,28 +278,9 @@ __global__ void opening_kernel_shared(uint8_t* input, uint8_t* output, int width
 }
 
 
-/// @brief Initialise un état cuRAND par pixel (à lancer une seule fois)
-/// @param states tableau de width * height états
-/// @param width
-/// @param height
-/// @param seed graine globale
-__global__ void init_rand_states(curandState* states, int width, int height,
-                                 unsigned long long seed)
-{
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (x >= width || y >= height)
-        return;
-
-    int idx = y * width + x;
-    curand_init(idx, 0, 0, &states[idx]);
-}
-
-
-__global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs, curandState* states,
+__global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
                                   int width, int height, int stride,
-                                  int pixel_stride, size_t pitch_rs)
+                                  int pixel_stride, size_t pitch_rs, unsigned long long counter)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -324,10 +294,6 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs, curand
     rgb p = { line_ptr[0], line_ptr[1], line_ptr[2] };
 
     int m_idx = matching_reservoir(p, reservoirs, width, height, static_cast<int>(pitch_rs));
-
-
-    float rand_val = curand_uniform(&states[idx]);
-
   
     int global_idx = m_idx*pitch_rs+idx*sizeof(reservoir);
     reservoir r = *(reservoir*)((uint8_t*)reservoirs+global_idx);
@@ -362,6 +328,10 @@ __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs, curand
     else // Cas 3 : aucune correspondance, aucun slot vide
     {
         int min_idx = 0;
+        curandStatePhilox4_32_10_t state;
+        curand_init(1234ull, idx, counter, &state);
+        float rand_val = curand_uniform(&state);
+
 
         for (int i = 1; i < K; i++) {
             reservoir* r1 = (reservoir*)((uint8_t*)reservoirs+pitch_rs*i+idx*sizeof(reservoir));
@@ -541,10 +511,11 @@ namespace
 void difference(uint8_t* buffer, int width, int height, int stride,
                 int pixel_stride, size_t pitch_rs)
 {
+    static unsigned long long counter = 0;
     dim3 blockSize(32, 32);
     dim3 gridSize((width + 31)/32, (height + 31)/32);
 
-    difference_kernel <<<gridSize, blockSize>>> (buffer, rs, d_rand_states, width, height, stride, pixel_stride, pitch_rs);
+    difference_kernel <<<gridSize, blockSize>>> (buffer, rs, width, height, stride, pixel_stride, pitch_rs, counter++);
 }
 
 void cleanup() {
@@ -606,14 +577,6 @@ extern "C" {
             err = cudaMallocPitch(&dOriginal, &original_pitch, width * sizeof(rgb), height);
             CHECK_CUDA_ERROR(err);
             CHECK_CUDA_ERROR(cudaMalloc(&d_count, sizeof(int)));
-
-            // Init cuRAND : un état par pixel, initialisé une seule fois
-            CHECK_CUDA_ERROR(cudaMalloc(&d_rand_states, width * height * sizeof(curandState)));
-            dim3 initBlock(32, 32);
-            dim3 initGrid((width + 31) / 32, (height + 31) / 32);
-            init_rand_states<<<initGrid, initBlock>>>(d_rand_states, width, height, 1234ULL);
-            cudaCheckError();
-
             CHECK_CUDA_ERROR(cudaDeviceSynchronize());
         }
 
