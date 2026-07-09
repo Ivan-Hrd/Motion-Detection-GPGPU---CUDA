@@ -81,6 +81,11 @@
     L'ouverture est une érosion suivie d'une dilatation appliquée sur le masque de différence. L'érosion remplace chaque pixel par le minimum de ses voisins dans un rayon donné (RADIUS), ce qui élimine les petits points isolés (bruit) mais rétrécit aussi les vraies formes détectées. La dilatation fait l'inverse (maximum des voisins) et restaure la taille des objets qui ont survécu à l'érosion.
 
     \subsection{Seuillage d'hystérésis}
+    Le seuillage d'hystérésis transforme le masque issu de l'ouverture morphologique en un masque binaire plus robuste. Contrairement à un seuillage simple, il utilise deux seuils : un seuil bas \verb|LOW = 30| et un seuil haut \verb|HIGH = 40|. Les pixels dont l'intensité est supérieure au seuil haut sont considérés comme des marqueurs sûrs du mouvement. Les pixels situés entre les deux seuils sont seulement des candidats : ils ne sont conservés que s'ils sont connectés à une zone déjà validée.
+    \\
+    L'algorithme commence donc par parcourir l'image pour créer deux ensembles : \verb|marker| pour les pixels forts, et \verb|candidate| pour tous les pixels pouvant potentiellement appartenir au mouvement. Le buffer de sortie est ensuite remis à zéro, puis les marqueurs sont propagés itérativement aux candidats voisins. À chaque itération, un pixel candidat devient actif s'il est lui-même un marqueur ou s'il possède, dans son voisinage 8-connexe, un pixel déjà activé.
+    \\
+    Cette propagation continue jusqu'à stabilisation, c'est-à-dire jusqu'à ce qu'aucun nouveau pixel ne soit ajouté au masque. Le résultat final est un masque binaire où les petites réponses isolées, souvent dues au bruit, sont supprimées, tandis que les zones faibles mais connectées à un mouvement clair sont conservées. Cette étape permet donc d'obtenir une détection plus cohérente avant l'application du masquage visuel.
 
     \subsection{Fonction Masquage}
     La fonction de masquage a pour but de superposer visuellement le résultat de la détection de mouvement sur l'image originale. Plutôt que d'afficher uniquement le masque binaire en niveaux de gris, elle colore en rouge les zones détectées comme étant en mouvement, tout en conservant l'image d'origine.
