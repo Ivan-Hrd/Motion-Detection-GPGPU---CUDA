@@ -14,7 +14,7 @@
 #define HIGH 40
 #define RADIUS 1
 #define BLOCK_SIZE 16
-#define TILE_SIZE (BLOCK_SIZE + 4 * RADIUS)
+#define TILE_SIZE (BLOCK_SIZE + 2 * RADIUS)
 #define cudaCheckError() {                                                                   \
     cudaError_t e=cudaGetLastError();                                                        \
     if(e!=cudaSuccess) {                                                                     \
