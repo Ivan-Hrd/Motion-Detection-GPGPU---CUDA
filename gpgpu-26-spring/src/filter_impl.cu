@@ -84,17 +84,6 @@ __global__ void masquage(uint8_t* input,uint8_t*mask, int width, int height,int 
 
 }
 
-__global__ void init_rng(curandState* states, int width, int height)
-{
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height) return;
-
-    int idx = y * width + x;
-    curand_init(idx, 0, 0, &states[idx]);
-}
-
-
 /// @brief Black out the red channel from the video and add EPITA's logo
 /// @param buffer
 /// @param width
