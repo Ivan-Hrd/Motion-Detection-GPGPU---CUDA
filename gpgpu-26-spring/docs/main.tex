@@ -210,6 +210,39 @@ while (h_count > 0)
     \newline
     Après cet optimisation un speedup à bien eu lieu, et, logiquement, nous avons aussi une diminution de \texttt{estimated speedup} de NSight Compute visible sur la figure ~\ref{fig:cu-aos-after}.
 
+
+    \subsection{Alignement mémoire des réservoirs}
+    En plus de la réorganisation AoS vers SoA, nous avons également travaillé sur l'alignement mémoire des réservoirs utilisés par le kernel de différence. Dans la première version GPU, les réservoirs étaient alloués avec un simple \verb|cudaMalloc| dans un tableau linéaire de taille \verb|width * height * K|. Cette représentation fonctionnait, mais elle ne garantissait pas un alignement optimal des lignes de réservoirs ni un pas mémoire adapté aux contraintes du GPU.
+    \\
+    La structure \verb|reservoir| a donc été explicitement alignée sur 8 octets :
+
+    \begin{verbatim}
+struct __align__(8) reservoir
+{
+    rgb rgbV;
+    unsigned int w;
+};
+    \end{verbatim}
+
+    Cet alignement évite que deux champs d'un même réservoir soient placés sur des adresses peu favorables aux accès mémoire du GPU. Comme chaque thread lit et met à jour plusieurs réservoirs pour un même pixel, réduire les accès mal alignés permet de limiter le nombre de transactions mémoire nécessaires.
+    \\
+    L'allocation du tableau de réservoirs a aussi été remplacée par une allocation pitchée :
+
+    \begin{verbatim}
+cudaMallocPitch(&rs, &pitch_rs,
+                width * height * sizeof(reservoir), K);
+    \end{verbatim}
+
+    Chaque ligne correspond à un indice de réservoir donné, et contient les réservoirs de tous les pixels. Le pas \verb|pitch_rs| retourné par CUDA est ensuite utilisé dans le kernel pour calculer les adresses :
+
+    \begin{verbatim}
+reservoir r = *(reservoir*)((uint8_t*)reservoirs
+              + j * pitch_rs
+              + idx * sizeof(reservoir));
+    \end{verbatim}
+
+    Cette approche laisse CUDA choisir un alignement mémoire adapté pour chaque ligne du tableau. Elle complète l'optimisation SoA : les threads voisins accèdent à des réservoirs voisins en mémoire, et ces lignes de réservoirs sont elles-mêmes mieux alignées. On obtient ainsi des accès plus réguliers et plus efficaces dans \verb|difference_kernel|, qui était le kernel le plus coûteux après la réduction des transferts CPU/GPU.
+
     \subsection{Fusion des opérations morphologiques}
 
     L'implémentation initiale de l'ouverture morphologique reposait sur deux kernels CUDA distincts : un premier kernel réalisait l'érosion de l'image, puis un second effectuait la dilatation du résultat obtenu. Cette approche nécessitait l'utilisation d'un tampon intermédiaire \verb|eroded| stocké en mémoire globale du GPU.
@@ -387,7 +420,6 @@ Ecriture du résultat final
 
     \subsection{Premier bottleneck mémoire}
 
-    \newline
     \begin{figure}[htbp]
         \centering
         \includegraphics[width=0.85\linewidth]{nsightSYSnoOpti.jpg}
@@ -397,7 +429,6 @@ Ecriture du résultat final
     \FloatBarrier
 
     \subsection{Optimisation de transfert mémoire}
-    \newline
     \begin{figure}[htbp]
         \centering
         \includegraphics[width=0.85\linewidth]{nsightSYSoptiMem.jpg}
@@ -407,8 +438,7 @@ Ecriture du résultat final
     \FloatBarrier
 
     \subsection{SoA vers AoS}
-    \newline
-    Uncoalesced AoS: \newline
+    Uncoalesced AoS:
     \begin{figure}[htbp]
         \centering
         \includegraphics[width=0.85\linewidth]{nsightcuBeforeCoalesced.jpg}
@@ -417,8 +447,8 @@ Ecriture du résultat final
     \end{figure}
     \FloatBarrier
 
-    \newline
-    Coalescent access with SoA : \newline
+    \medskip
+    Coalescent access with SoA :
     \begin{figure}[htbp]
         \centering
         \includegraphics[width=0.85\linewidth]{nsightcuAfterCoalesced.jpg}
