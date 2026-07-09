@@ -13,7 +13,9 @@
 #define LOW 30
 #define HIGH 40
 #define RADIUS 1
-#define cudaCheckError() {                                                                       \
+#define BLOCK_SIZE 16
+#define TILE_SIZE (BLOCK_SIZE + 2 * RADIUS)
+#define cudaCheckError() {                                                                   \
     cudaError_t e=cudaGetLastError();                                                        \
     if(e!=cudaSuccess) {                                                                     \
         printf("Cuda failure %s:%d: '%s'\n",__FILE__,__LINE__,cudaGetErrorString(e));        \
@@ -56,7 +58,6 @@ bool* marker = nullptr;
 bool* candidate = nullptr;
 bool* d_changed = nullptr;
 uint8_t* dOriginal = nullptr;
-uint8_t* eroded = nullptr;
 int* d_count = nullptr;
 curandState* d_rand_states = nullptr;
 
@@ -147,69 +148,133 @@ __device__ uint8_t get_gray_pixel(uint8_t* buffer, int x, int y, int stride, int
     uint8_t* pixel = buffer + y * stride + x * pixel_stride;
     return pixel[0];
 }
-__global__ void erosion_kernel(uint8_t* buffer,uint8_t * eroded,  int width, int height, int stride,int pixel_stride,int radius)
+
+__global__ void opening_kernel_shared(uint8_t* input, uint8_t* output, int width, int height, int stride, int pixel_stride)
 {
+    __shared__ uint8_t tile[TILE_SIZE][TILE_SIZE];
+    __shared__ uint8_t erodeTile[BLOCK_SIZE][BLOCK_SIZE];
 
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
 
-    if (x >= width || y >= height)
+    int x = blockIdx.x * BLOCK_SIZE + tx;
+    int y = blockIdx.y * BLOCK_SIZE + ty;
+
+    int gx = min(max(x, 0), width - 1);
+    int gy = min(max(y, 0), height - 1);
+
+    tile[ty + RADIUS][tx + RADIUS] =
+        input[gy * stride + gx * pixel_stride];
+
+    if (tx < RADIUS)
     {
-        return;
+        int xx = max(x - RADIUS, 0);
+
+        tile[ty + RADIUS][tx] =
+            input[gy * stride + xx * pixel_stride];
     }
-    uint8_t min_value = 255;
-    for (int dy = -radius; dy <= radius; dy++)
-    {
-	    int yy = y + dy;
-	    if (yy < 0 || yy >= height)
-	    {
-	    	continue;
-	    }
-	    for (int dx = -radius; dx <= radius;dx++)
-	    {
-		    int xx = x + dx;
-		    if (xx < 0 || xx >= width)
-		    {
-			    continue;
-		    }
 
-		    uint8_t value = get_gray_pixel(buffer,xx,yy,stride,pixel_stride);
-		    min_value = min(min_value,value);
-	    }
+    if (tx >= BLOCK_SIZE - RADIUS)
+    {
+        int xx = min(x + RADIUS, width - 1);
+
+        tile[ty + RADIUS][tx + 2 * RADIUS] =
+            input[gy * stride + xx * pixel_stride];
     }
-    eroded[y * width + x] = min_value;
-}
 
-
-__global__ void dilatation_kernel(const uint8_t * input,uint8_t* output, int width, int height, int stride, int pixel_stride,int radius) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height)
-        return;
-    uint8_t max_value = 0;
-    for (int dy = -radius; dy <= radius; dy++)
+    if (ty < RADIUS)
     {
-        int yy = y + dy;
-        if (yy < 0 || yy >= height)
+        int yy = max(y - RADIUS, 0);
+
+        tile[ty][tx + RADIUS] =
+            input[yy * stride + gx * pixel_stride];
+    }
+
+    if (ty >= BLOCK_SIZE - RADIUS)
+    {
+        int yy = min(y + RADIUS, height - 1);
+
+        tile[ty + 2 * RADIUS][tx + RADIUS] =
+            input[yy * stride + gx * pixel_stride];
+    }
+
+    if (tx < RADIUS && ty < RADIUS)
+    {
+        tile[ty][tx] =
+            input[max(y - RADIUS, 0) * stride +
+                  max(x - RADIUS, 0) * pixel_stride];
+    }
+
+    if (tx >= BLOCK_SIZE - RADIUS && ty < RADIUS)
+    {
+        tile[ty][tx + 2 * RADIUS] =
+            input[max(y - RADIUS, 0) * stride +
+                  min(x + RADIUS, width - 1) * pixel_stride];
+    }
+
+    if (tx < RADIUS && ty >= BLOCK_SIZE - RADIUS)
+    {
+        tile[ty + 2 * RADIUS][tx] =
+            input[min(y + RADIUS, height - 1) * stride +
+                  max(x - RADIUS, 0) * pixel_stride];
+    }
+
+    if (tx >= BLOCK_SIZE - RADIUS &&
+        ty >= BLOCK_SIZE - RADIUS)
+    {
+        tile[ty + 2 * RADIUS][tx + 2 * RADIUS] =
+            input[min(y + RADIUS, height - 1) * stride +
+                  min(x + RADIUS, width - 1) * pixel_stride];
+    }
+
+    __syncthreads();
+
+    if (x < width && y < height)
+    {
+        uint8_t v = 255;
+
+        #pragma unroll
+        for (int dy = -1; dy <= 1; dy++)
         {
-            continue;
-        }
-        for (int dx = -radius; dx <= radius;dx++)
-        {
-            int xx = x + dx;
-            if (xx < 0 || xx >= width)
+            #pragma unroll
+            for (int dx = -1; dx <= 1; dx++)
             {
-                continue;
+                v = min(v,
+                        tile[ty + RADIUS + dy]
+                            [tx + RADIUS + dx]);
             }
-
-            uint8_t value = input[yy * width + xx];
-            max_value = max(max_value,value);
         }
+
+        erodeTile[ty][tx] = v;
     }
-    int idx =  y * stride + x * pixel_stride;
-    output[idx] = max_value;
-    output[idx + 1] = max_value;
-    output[idx + 2] = max_value;
+
+    __syncthreads();
+
+
+    if (x < width && y < height)
+    {
+        uint8_t v = 0;
+
+        for (int dy = -1; dy <= 1; dy++)
+        {
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                int xx = min(max(tx + dx, 0),
+                             BLOCK_SIZE - 1);
+
+                int yy = min(max(ty + dy, 0),
+                             BLOCK_SIZE - 1);
+
+                v = max(v, erodeTile[yy][xx]);
+            }
+        }
+
+        int idx = y * stride + x * pixel_stride;
+
+        output[idx] = v;
+        output[idx + 1] = v;
+        output[idx + 2] = v;
+    }
 }
 
 
@@ -475,10 +540,6 @@ void cleanup() {
         cudaFree(d_changed);
         d_changed = nullptr;
     }
-    if (eroded != nullptr) {
-        cudaFree(eroded);
-        eroded = nullptr;
-    }
     if (dOriginal != nullptr) {
         cudaFree(dOriginal);
         dOriginal = nullptr;
@@ -512,13 +573,13 @@ extern "C" {
             CHECK_CUDA_ERROR(cudaMalloc(&marker, width * height * sizeof(bool)));
             CHECK_CUDA_ERROR(cudaMalloc(&candidate, width * height * sizeof(bool)));
             CHECK_CUDA_ERROR(cudaMalloc(&d_changed, sizeof(bool)));
-            err = cudaMalloc(&eroded,width * sizeof(uint8_t) * height);
-            CHECK_CUDA_ERROR(err);
+
             err = cudaMallocPitch(&dOriginal, &original_pitch, width * sizeof(rgb), height);
             CHECK_CUDA_ERROR(err);
             CHECK_CUDA_ERROR(cudaMalloc(&d_count, sizeof(int)));
             CHECK_CUDA_ERROR(cudaDeviceSynchronize());
         }
+
         dim3 blockSize(32,32);
         dim3 gridSize((width + (blockSize.x - 1)) / blockSize.x, (height + (blockSize.y - 1)) / blockSize.y);
 
@@ -551,12 +612,10 @@ extern "C" {
         CHECK_CUDA_ERROR(cudaDeviceSynchronize());
 
         // STEP2: Ouverture
-        erosion_kernel<<<gridSize,blockSize>>>(dBuffer,eroded,width,height,pitch,pixel_stride,RADIUS);
-
-        cudaCheckError();
-
-        dilatation_kernel<<<gridSize,blockSize>>>(eroded,dBuffer,width,height,pitch,pixel_stride,RADIUS);
-
+        dim3 blockSize2(16,16);
+        dim3 gridSize2((width + (blockSize2.x - 1)) / blockSize2.x, (height + (blockSize2.y - 1)) / blockSize2.y);
+        opening_kernel_shared<<<gridSize2, blockSize2>>>(dBuffer, dBuffer, width, height, pitch, pixel_stride);
+        cudaDeviceSynchronize();
         cudaCheckError();
 
         // STEP 3 : Hysteresis
