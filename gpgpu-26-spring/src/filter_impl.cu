@@ -14,8 +14,8 @@
 #define HIGH 40
 #define RADIUS 1
 #define BLOCK_SIZE 16
-#define TILE_SIZE (BLOCK_SIZE + 2 * RADIUS)
-#define cudaCheckError() {                                                                       \
+#define TILE_SIZE (BLOCK_SIZE + 4 * RADIUS)
+#define cudaCheckError() {                                                                   \
     cudaError_t e=cudaGetLastError();                                                        \
     if(e!=cudaSuccess) {                                                                     \
         printf("Cuda failure %s:%d: '%s'\n",__FILE__,__LINE__,cudaGetErrorString(e));        \
@@ -649,7 +649,9 @@ extern "C" {
         CHECK_CUDA_ERROR(cudaDeviceSynchronize());
 
         // STEP2: Ouverture
-        opening_kernel_shared<<<gridSize, blockSize>>>(dBuffer, dBuffer, width, height, pitch, pixel_stride);
+        dim3 blockSize2(16,16);
+        dim3 gridSize2((width + (blockSize2.x - 1)) / blockSize2.x, (height + (blockSize2.y - 1)) / blockSize2.y);
+        opening_kernel_shared<<<gridSize2, blockSize2>>>(dBuffer, dBuffer, width, height, pitch, pixel_stride);
         cudaDeviceSynchronize();
         cudaCheckError();
 
