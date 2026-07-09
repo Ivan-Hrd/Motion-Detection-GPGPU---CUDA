@@ -79,8 +79,26 @@
 
     \subsection{Seuillage d'hystérésis}
 
-    \subsection{Masquage final}
-
+    \subsection{Fonction Masquage}
+    La fonction de masquage a pour but de superposer visuellement le résultat de la détection de mouvement sur l'image originale. Plutôt que d'afficher uniquement le masque binaire en niveaux de gris, elle colore en rouge les zones détectées comme étant en mouvement, tout en conservant l'image d'origine.
+    \\
+    Pour chaque pixel, on récupère la valeur du masque $m \in [0, 1]$ obtenue en normalisant la composante rouge du buffer de masque :
+    
+    \begin{verbatim}
+    float m = maskptr[0] / 255.0f;
+    \end{verbatim}
+    On additionne ensuite à la composante rouge du pixel original une contribution proportionnelle à $m$ :
+    
+    \begin{verbatim}
+    lineptr[0] = min(255, lineptr[0] + 0.5 * 255 * m);
+    \end{verbatim}
+    
+    Cela revient à appliquer la formule :
+    \[
+        \text{output} = \text{clamp}\left(\text{input} + 0.5 \times \text{rouge} \times m,\ 0,\ 255\right)
+    \]
+    où \verb|rouge| $= (255, 0, 0)$. Seule la composante rouge est modifiée, les composantes verte et bleue restant inchangées. Ainsi, plus un pixel est détecté comme appartenant au premier plan (valeur de masque élevée), plus sa teinte rouge est accentuée dans l'image de sortie.
+    
     \section{Portage GPU}
     On a fait le choix d'implémenter toute la pipeline (les 4 étapes) sur GPU pour minimiser le transfert de mémoire CPU $\leftrightarrow$ GPU.
 
@@ -147,6 +165,24 @@ while (h_count > 0)
 
     On passe ainsi de deux transferts PCIe par itération à un seul, tout en garantissant la correction de l'algorithme en présence d'exécutions concurrentes.
 
+
+    \subsection{Fonction de masquage}
+    Le portage de la fonction de masquage en CUDA est relativement direct, la logique de calcul restant identique à la version CPU. La principale différence réside dans le remplacement des boucles imbriquées par un kernel GPU où chaque thread traite un pixel indépendamment :
+    
+    \begin{verbatim}
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    \end{verbatim}
+    
+    Une différence notable par rapport à la version CPU est l'ajout d'un paramètre \verb|mask_stride| distinct du \verb|input_stride|. En effet, sur GPU les buffers \verb|input| et \verb|mask| sont alloués séparément via \verb|cudaMallocPitch|, qui peut choisir des alignements mémoire différents pour chacun. Il est donc nécessaire de distinguer les deux strides pour calculer correctement les adresses des pixels :
+    
+    \begin{verbatim}
+    uint8_t* lineptr = input + y * input_stride + x * pixel_stride;
+    uint8_t* maskptr = mask  + y * mask_stride  + x * pixel_stride;
+    \end{verbatim}
+    
+    Le calcul lui-même reste inchangé : on normalise la valeur du masque, on l'utilise comme facteur pour accentuer la composante rouge, et on sature le résultat à 255.
+        
 
     \bigskip
     \section{Optimisation GPU}
@@ -220,7 +256,7 @@ Ecriture du résultat final
     \subsection{Baseline}
     \begin{itemize}[leftmargin=1.5cm]
     \item Différence + ouverture \hfill --- \textbf{Ivan}
-    \item Seuillage d'hystérésis \hfill --- \textbf{Steeve + Clément}
+    \item Seuillage d'hystérésis \hfill --- \textbf{Steeve}
     \item Masquage \hfill --- \textbf{Marcel}
     \end{itemize}
 
@@ -228,7 +264,7 @@ Ecriture du résultat final
     \begin{itemize}[leftmargin=1.5cm]
     \item Ouverture (kernel érosion + dilatation) \hfill --- \textbf{Marcel}
     \item Fonction différence \hfill --- \textbf{Clément}
-    \item Seuillage d'hystérésis \hfill --- \textbf{Ivan + Steeve}
+    \item Seuillage d'hystérésis \hfill --- \textbf{Ivan + Steeve + Clément}
     \item Masquage \hfill --- \textbf{Marcel}
     \end{itemize}
 
