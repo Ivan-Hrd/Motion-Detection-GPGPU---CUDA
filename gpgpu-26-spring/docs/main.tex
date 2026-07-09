@@ -13,6 +13,9 @@
 \usepackage{fancyhdr}
 \usepackage[hidelinks]{hyperref}
 \usepackage{placeins}
+\usepackage{array}
+\usepackage{tabularx}
+
 
 \geometry{margin=2.5cm}
 \pgfplotsset{compat=1.17}
@@ -83,22 +86,22 @@
     La fonction de masquage a pour but de superposer visuellement le résultat de la détection de mouvement sur l'image originale. Plutôt que d'afficher uniquement le masque binaire en niveaux de gris, elle colore en rouge les zones détectées comme étant en mouvement, tout en conservant l'image d'origine.
     \\
     Pour chaque pixel, on récupère la valeur du masque $m \in [0, 1]$ obtenue en normalisant la composante rouge du buffer de masque :
-    
+
     \begin{verbatim}
     float m = maskptr[0] / 255.0f;
     \end{verbatim}
     On additionne ensuite à la composante rouge du pixel original une contribution proportionnelle à $m$ :
-    
+
     \begin{verbatim}
     lineptr[0] = min(255, lineptr[0] + 0.5 * 255 * m);
     \end{verbatim}
-    
+
     Cela revient à appliquer la formule :
     \[
         \text{output} = \text{clamp}\left(\text{input} + 0.5 \times \text{rouge} \times m,\ 0,\ 255\right)
     \]
     où \verb|rouge| $= (255, 0, 0)$. Seule la composante rouge est modifiée, les composantes verte et bleue restant inchangées. Ainsi, plus un pixel est détecté comme appartenant au premier plan (valeur de masque élevée), plus sa teinte rouge est accentuée dans l'image de sortie.
-    
+
     \section{Portage GPU}
     On a fait le choix d'implémenter toute la pipeline (les 4 étapes) sur GPU pour minimiser le transfert de mémoire CPU $\leftrightarrow$ GPU.
 
@@ -168,21 +171,21 @@ while (h_count > 0)
 
     \subsection{Fonction de masquage}
     Le portage de la fonction de masquage en CUDA est relativement direct, la logique de calcul restant identique à la version CPU. La principale différence réside dans le remplacement des boucles imbriquées par un kernel GPU où chaque thread traite un pixel indépendamment :
-    
+
     \begin{verbatim}
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     \end{verbatim}
-    
+
     Une différence notable par rapport à la version CPU est l'ajout d'un paramètre \verb|mask_stride| distinct du \verb|input_stride|. En effet, sur GPU les buffers \verb|input| et \verb|mask| sont alloués séparément via \verb|cudaMallocPitch|, qui peut choisir des alignements mémoire différents pour chacun. Il est donc nécessaire de distinguer les deux strides pour calculer correctement les adresses des pixels :
-    
+
     \begin{verbatim}
     uint8_t* lineptr = input + y * input_stride + x * pixel_stride;
     uint8_t* maskptr = mask  + y * mask_stride  + x * pixel_stride;
     \end{verbatim}
-    
+
     Le calcul lui-même reste inchangé : on normalise la valeur du masque, on l'utilise comme facteur pour accentuer la composante rouge, et on sature le résultat à 255.
-        
+
 
     \bigskip
     \section{Optimisation GPU}
@@ -256,7 +259,7 @@ Ecriture du résultat final
     \subsection{Baseline}
     \begin{itemize}[leftmargin=1.5cm]
     \item Différence + ouverture \hfill --- \textbf{Ivan}
-    \item Seuillage d'hystérésis \hfill --- \textbf{Steeve}
+    \item Seuillage d'hystérésis \hfill --- \textbf{Steeve + Clément}
     \item Masquage \hfill --- \textbf{Marcel}
     \end{itemize}
 
@@ -264,7 +267,7 @@ Ecriture du résultat final
     \begin{itemize}[leftmargin=1.5cm]
     \item Ouverture (kernel érosion + dilatation) \hfill --- \textbf{Marcel}
     \item Fonction différence \hfill --- \textbf{Clément}
-    \item Seuillage d'hystérésis \hfill --- \textbf{Ivan + Steeve + Clément}
+    \item Seuillage d'hystérésis \hfill --- \textbf{Ivan + Steeve}
     \item Masquage \hfill --- \textbf{Marcel}
     \end{itemize}
 
@@ -274,7 +277,6 @@ Ecriture du résultat final
     \item Optimisation alignement mémoire (\texttt{mallocPitch} + \texttt{alignas}) \hfill --- \textbf{Steeve}
     \item Fusion des kernels d'érosion et de dilatation \hfill --- \textbf{Clément}
     \item Changement de la fonction de génération aléatoire \hfill --- \textbf{Ivan}
-    \item \textit{... à compléter}
     \end{itemize}
 
     \bigskip
@@ -286,7 +288,7 @@ Ecriture du résultat final
     \begin{itemize}[leftmargin=1.5cm]
     \item \textbf{Vidéo(s) utilisée(s)} : Pour l'ensemble des tests qui suivent la vidéo "video03.avi" fourni par le sujet (résolution de 320 × 240, 60 frames/secondes pour une vidéo de 28 secondes, vidéo d'une autoroute avec des voitures qui passent au fur et à mesure que la vidéo défile)
     \item \textbf{Configuration matérielle} : CPU \textit{Intel(R) Core(TM) i5-11400H @ 2.70GHz}, GPU \textit{RTX 3050Ti laptop}, driver CUDA \textit{version 12.8}
-    \item \textbf{Méthode de mesure} : La vidéo fait 28 secondes, à 60 FPS, on a $\# FPS = 60*28/(tot)$ avec tot le nombre de secondes total. Le même principe est utilisé pour le temps moyen par frame (en millisecondes).
+    \item \textbf{Méthode de mesure} : La commande du README du projet à été utilisé pour obtenir le nombre de frame par seconde, pour connaitre le temps moyen par frame on effectue alors 1/FPS (multiplié par 1000 pour avoir la valeur en millisecondes).
     \item \textbf{Métrique} : temps moyen par frame (ms) et FPS équivalent
     \end{itemize}
 
@@ -294,46 +296,84 @@ Ecriture du résultat final
 
     \subsection{V0 baseline}
     Temps total : 1minute 37secondes \newline
-    Temps moyen par frame : 58ms \newline
-    FPS : 17 \newline
+    Temps moyen par frame (filtre seul) : 10,752ms \newline
+    FPS (filtre seul) : 93 FPS \newline
 
     \subsection{V1.0.0 GPU non-optimisé}
     Temps total : 2secondes24 \newline
-    Temps moyen par frame : 1,337ms \newline
-    FPS : 747,9 fps \newline
+    Temps moyen par frame (filtre CUDA seul) : 0,775ms \newline
+    FPS (filtre CUDA seul) : 1289 FPS \newline
 
     \subsection{V1.0.1 GPU accès mémoire \& transfert de données optimisés}
     Temps total : 2secondes06 \newline
-    Temps moyen par frame : 1,231ms \newline
-    FPS : 812,6 fps \newline
+    Temps moyen par frame (filtre CUDA seul) : 0,562ms \newline
+    FPS (filtre CUDA seul) : 1779 FPS \newline
 
-    \subsection{V1.0.2 GPU ...}
-    Temps moyen par frame : xx \newline
-    FPS : XX \newline
+    \subsection{V1.0.2 GPU new curand \& kernel erosion dilation fusionnés}
+    Temps total : 2secondes06 + ou - 2 secondes \newline
+    Temps moyen par frame (filtre CUDA seul) : 0,492ms \newline
+    FPS (filtre CUDA seul) : 2031 FPS \newline
 
     \bigskip
 
     \subsection{Synthèse comparative des versions}
 
-    Le tableau~\ref{tab:synthese} résume les performances de l'ensemble des versions par rapport à la baseline CPU.
+    Le tableau~\ref{tab:synthese} résume les performances de l'ensemble des versions par rapport à la baseline CPU. \newline
+    Attention, il ne prend pas en compte l'optimisation en accès mémoire qui n'a pas un effet sur les kernels mais sur le temps de la pipeline entière.
 
     \begin{table}[h!]
         \centering
-        \begin{tabular}{lccc}
-            \toprule
-            \textbf{Version} & \textbf{Temps moyen / frame (ms)} & \textbf{FPS} & \textbf{Speedup vs V0} \\
-            \midrule
-            V0 (baseline CPU)                          & \textit{58} & \textit{17} & $\times 1.0$ \\
-            V1.0.0 (GPU non-optimisé)                  & \textit{1337} & \textit{747,9} & \textit{...} \\
-            V1.0.1 (accès mémoire \& transfert)         & \textit{1231} & \textit{812,6} & \textit{...} \\
-            V1.0.2 (\textit{...})                       & \textit{...} & \textit{...} & \textit{...} \\
-            \bottomrule
-        \end{tabular}
+        \begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}Xccc}
+        \toprule
+        \textbf{Version} & \textbf{Temps moyen / frame (ms)} & \textbf{FPS} & \textbf{Speedup vs V0} \\
+        \midrule
+        V0 (baseline CPU) & 10,752 & 93 & $\times 1,00$ \\
+        V1.0.0 (GPU non-optimisé) & 0,775 & 1289 & $\times 13,87$ \\
+        V1.0.1 (accès mémoire \& transfert) & 0,562 & 1779 & $\times 19,13$ \\
+        V1.0.2 (new curand \& fusion erosion dilation) & 0,492 & 2031 & $\times 21,85$ \\
+        \bottomrule
+        \end{tabularx}
         \caption{Comparaison des performances par version}
         \label{tab:synthese}
     \end{table}
 
-
+    \begin{figure}[h!]
+        \centering
+        \begin{tikzpicture}
+            \begin{axis}[
+                width=0.9\linewidth,
+            height=7cm,
+            xlabel={Version du programme},
+            ylabel={Speedup ($\times$ vs V0)},
+            symbolic x coords={V0, V1.0.0, V1.0.1, V1.0.2},
+            xtick=data,
+            ymin=0,
+            ymax=24,
+            nodes near coords,
+            nodes near coords align={vertical},
+            every node near coord/.append style={font=\small},
+            enlarge x limits=0.15,
+            grid=major,
+            grid style={gray!20},
+            axis lines=left,
+            ]
+                \addplot[
+                    color=blue,
+                    mark=*,
+                    thick,
+                    mark options={fill=blue}
+                ] coordinates {
+                    (V0,1.00)
+                    (V1.0.0,13.87)
+                    (V1.0.1,19.13)
+                    (V1.0.2,21.85)
+                };
+            \end{axis}
+        \end{tikzpicture}
+        \caption{Évolution du speedup par rapport à la baseline CPU (V0) au fil des versions}
+        \label{fig:speedup}
+    \end{figure}
+    \FloatBarrier
 
 
 %============================================================
@@ -387,5 +427,4 @@ Ecriture du résultat final
 
 %------------------------------------------------------------
 \end{document}
-
 
