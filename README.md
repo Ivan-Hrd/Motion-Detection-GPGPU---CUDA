@@ -1,7 +1,5 @@
 # GPU Accelerated Motion Detection in CUDA
 
-Using : C++, CUDA, Nsight Systems, Nsight Compute, Git
-
 ## Overview
 
 This project implements a motion detection filter, first developed as a CPU baseline to validate correctness, then rewritten as a full CUDA pipeline to run on GPU.
