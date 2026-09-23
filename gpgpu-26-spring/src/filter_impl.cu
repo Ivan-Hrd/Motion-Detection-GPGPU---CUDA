@@ -14,7 +14,9 @@
 #define HIGH 40
 #define RADIUS 1
 #define BLOCK_SIZE 16
-#define TILE_SIZE (BLOCK_SIZE + 2 * RADIUS)
+#define TILE_SIZE (BLOCK_SIZE + 4 * RADIUS)
+#define ERODE_SIZE (BLOCK_SIZE + 2 * RADIUS)
+
 #define cudaCheckError() {                                                                   \
     cudaError_t e=cudaGetLastError();                                                        \
     if(e!=cudaSuccess) {                                                                     \
@@ -149,134 +151,77 @@ __device__ uint8_t get_gray_pixel(uint8_t* buffer, int x, int y, int stride, int
     return pixel[0];
 }
 
-__global__ void opening_kernel_shared(uint8_t* input, uint8_t* output, int width, int height, int stride, int pixel_stride)
+__global__ void opening_kernel_shared(uint8_t* input, uint8_t* output,
+                                       int width, int height,
+                                       int stride, int pixel_stride)
 {
     __shared__ uint8_t tile[TILE_SIZE][TILE_SIZE];
-    __shared__ uint8_t erodeTile[BLOCK_SIZE][BLOCK_SIZE];
+    __shared__ uint8_t erodeTile[ERODE_SIZE][ERODE_SIZE];
 
     int tx = threadIdx.x;
     int ty = threadIdx.y;
 
-    int x = blockIdx.x * BLOCK_SIZE + tx;
-    int y = blockIdx.y * BLOCK_SIZE + ty;
+    int bx = blockIdx.x * BLOCK_SIZE;
+    int by = blockIdx.y * BLOCK_SIZE;
 
-    int gx = min(max(x, 0), width - 1);
-    int gy = min(max(y, 0), height - 1);
-
-    tile[ty + RADIUS][tx + RADIUS] =
-        input[gy * stride + gx * pixel_stride];
-
-    if (tx < RADIUS)
+    for (int ly = ty; ly < TILE_SIZE; ly += BLOCK_SIZE)
     {
-        int xx = max(x - RADIUS, 0);
+        int gy = min(max(by - 2 * RADIUS + ly, 0), height - 1);
 
-        tile[ty + RADIUS][tx] =
-            input[gy * stride + xx * pixel_stride];
-    }
-
-    if (tx >= BLOCK_SIZE - RADIUS)
-    {
-        int xx = min(x + RADIUS, width - 1);
-
-        tile[ty + RADIUS][tx + 2 * RADIUS] =
-            input[gy * stride + xx * pixel_stride];
-    }
-
-    if (ty < RADIUS)
-    {
-        int yy = max(y - RADIUS, 0);
-
-        tile[ty][tx + RADIUS] =
-            input[yy * stride + gx * pixel_stride];
-    }
-
-    if (ty >= BLOCK_SIZE - RADIUS)
-    {
-        int yy = min(y + RADIUS, height - 1);
-
-        tile[ty + 2 * RADIUS][tx + RADIUS] =
-            input[yy * stride + gx * pixel_stride];
-    }
-
-    if (tx < RADIUS && ty < RADIUS)
-    {
-        tile[ty][tx] =
-            input[max(y - RADIUS, 0) * stride +
-                  max(x - RADIUS, 0) * pixel_stride];
-    }
-
-    if (tx >= BLOCK_SIZE - RADIUS && ty < RADIUS)
-    {
-        tile[ty][tx + 2 * RADIUS] =
-            input[max(y - RADIUS, 0) * stride +
-                  min(x + RADIUS, width - 1) * pixel_stride];
-    }
-
-    if (tx < RADIUS && ty >= BLOCK_SIZE - RADIUS)
-    {
-        tile[ty + 2 * RADIUS][tx] =
-            input[min(y + RADIUS, height - 1) * stride +
-                  max(x - RADIUS, 0) * pixel_stride];
-    }
-
-    if (tx >= BLOCK_SIZE - RADIUS &&
-        ty >= BLOCK_SIZE - RADIUS)
-    {
-        tile[ty + 2 * RADIUS][tx + 2 * RADIUS] =
-            input[min(y + RADIUS, height - 1) * stride +
-                  min(x + RADIUS, width - 1) * pixel_stride];
-    }
-
-    __syncthreads();
-
-    if (x < width && y < height)
-    {
-        uint8_t v = 255;
-
-        #pragma unroll
-        for (int dy = -1; dy <= 1; dy++)
+        for (int lx = tx; lx < TILE_SIZE; lx += BLOCK_SIZE)
         {
-            #pragma unroll
-            for (int dx = -1; dx <= 1; dx++)
-            {
-                v = min(v,
-                        tile[ty + RADIUS + dy]
-                            [tx + RADIUS + dx]);
-            }
+            int gx = min(max(bx - 2 * RADIUS + lx, 0), width - 1);
+            tile[ly][lx] = input[gy * stride + gx * pixel_stride];
         }
-
-        erodeTile[ty][tx] = v;
     }
 
     __syncthreads();
 
+    for (int ey = ty; ey < ERODE_SIZE; ey += BLOCK_SIZE)
+    {
+        for (int ex = tx; ex < ERODE_SIZE; ex += BLOCK_SIZE)
+        {
+            uint8_t v = 255;
+
+            #pragma unroll
+            for (int dy = -RADIUS; dy <= RADIUS; dy++)
+            {
+                #pragma unroll
+                for (int dx = -RADIUS; dx <= RADIUS; dx++)
+                {
+                    v = min(v, tile[ey + RADIUS + dy][ex + RADIUS + dx]);
+                }
+            }
+
+            erodeTile[ey][ex] = v;
+        }
+    }
+
+    __syncthreads();
+
+    int x = bx + tx;
+    int y = by + ty;
 
     if (x < width && y < height)
     {
         uint8_t v = 0;
 
-        for (int dy = -1; dy <= 1; dy++)
+        #pragma unroll
+        for (int dy = -RADIUS; dy <= RADIUS; dy++)
         {
-            for (int dx = -1; dx <= 1; dx++)
+            #pragma unroll
+            for (int dx = -RADIUS; dx <= RADIUS; dx++)
             {
-                int xx = min(max(tx + dx, 0),
-                             BLOCK_SIZE - 1);
-
-                int yy = min(max(ty + dy, 0),
-                             BLOCK_SIZE - 1);
-
-                v = max(v, erodeTile[yy][xx]);
+                v = max(v, erodeTile[ty + RADIUS + dy][tx + RADIUS + dx]);
             }
         }
 
         int idx = y * stride + x * pixel_stride;
-
-        output[idx] = v;
+        output[idx]     = v;
         output[idx + 1] = v;
         output[idx + 2] = v;
     }
 }
-
 
 __global__ void difference_kernel(uint8_t* buffer, reservoir* reservoirs,
                                   int width, int height, int stride,
